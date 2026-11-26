@@ -10,6 +10,7 @@ const CARD_SELECTORS = [
 const BV_REGEX = /\/video\/(BV[0-9A-Za-z]+)/;
 const FEED_BTN_CLASS = 'afp-feed-btn';
 const MASK_CLASS = 'afp-card-mask';
+const DEBUG_BADGE_CLASS = 'afp-debug-badge';
 
 /**
  * WeakMap guarantees card metadata is garbage-collected automatically when
@@ -57,15 +58,25 @@ function extractItemFromDom(el: HTMLElement, apiCache: Map<string, NormalizedIte
 export class BilibiliAdapter implements SiteAdapter {
   readonly platform = 'bilibili' as const;
 
-  scanCards(apiCache: Map<string, NormalizedItem>): CardBinding[] {
+  scanCards(apiCache: Map<string, NormalizedItem>, forceRescan = false): CardBinding[] {
     const nodes = document.querySelectorAll<HTMLElement>(CARD_SELECTORS);
     const bindings: CardBinding[] = [];
 
     for (const el of nodes) {
+      // Never touch elements inside Bilibili's top navigation header.
+      if (el.closest('#biliMainHeader, .bili-header, header')) continue;
+      // Avoid double-masking nested cards (Bilibili homepage wraps .bili-video-card inside .feed-card).
+      if (el.classList.contains('feed-card') && el.querySelector('.bili-video-card')) continue;
+
       const item = extractItemFromDom(el, apiCache);
       if (!item) continue;
 
-      if (trackedCards.get(el) === item.item_id) continue;
+      if (forceRescan) {
+        // Skip cards that are already masked so we don't double-count them.
+        if (el.querySelector(`.${MASK_CLASS}`)) continue;
+      } else if (trackedCards.get(el) === item.item_id) {
+        continue;
+      }
       trackedCards.set(el, item.item_id);
       bindings.push({ element: el, item });
     }
@@ -91,7 +102,7 @@ export class BilibiliAdapter implements SiteAdapter {
       position: 'absolute',
       top: '6px',
       right: '6px',
-      zIndex: '20',
+      zIndex: '5',
       padding: '2px 8px',
       fontSize: '12px',
       lineHeight: '18px',
@@ -128,6 +139,7 @@ export class BilibiliAdapter implements SiteAdapter {
     }
 
     const isAutoBlocked = decision.layer === 'L2' || decision.reason !== '你手动投喂给了宠物';
+    const isCompact = element.offsetHeight > 0 && element.offsetHeight < 130;
 
     // Preserve card outer box dimensions so Bilibili's grid layout never jumps.
     const mask = document.createElement('div');
@@ -135,13 +147,15 @@ export class BilibiliAdapter implements SiteAdapter {
     Object.assign(mask.style, {
       position: 'absolute',
       inset: '0',
-      zIndex: '30',
+      zIndex: '8',
+      boxSizing: 'border-box',
+      overflow: 'hidden',
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'center',
       justifyContent: 'center',
-      gap: '8px',
-      padding: '12px',
+      gap: isCompact ? '3px' : '8px',
+      padding: isCompact ? '6px 8px' : '12px',
       textAlign: 'center',
       borderRadius: '8px',
       background: isAutoBlocked
@@ -152,7 +166,7 @@ export class BilibiliAdapter implements SiteAdapter {
         : '1px solid rgba(148, 163, 184, 0.25)',
       backdropFilter: 'blur(10px)',
       color: '#e5e7eb',
-      fontSize: '12px',
+      fontSize: isCompact ? '11px' : '12px',
     });
 
     const label = document.createElement('div');
@@ -161,23 +175,125 @@ export class BilibiliAdapter implements SiteAdapter {
       : '🐾 已手动投喂给宠物';
     label.style.fontWeight = '600';
     label.style.color = isAutoBlocked ? '#7dd3fc' : '#f1f5f9';
+    if (isCompact) {
+      label.style.display = 'none';
+    }
+
+    // Show the blocked item's own title so the user can verify without peeking or polluting whitelist.
+    const itemPreview = document.createElement('div');
+    const authorSuffix = !isCompact && item.author_name ? ` · ${item.author_name}` : '';
+    itemPreview.textContent = isCompact
+      ? `${isAutoBlocked ? '✨' : '🐾'} ${item.title}`
+      : `原视频：${item.title}${authorSuffix}`;
+    Object.assign(itemPreview.style, {
+      color: isCompact ? '#e2e8f0' : '#cbd5e1',
+      fontSize: isCompact ? '11px' : '11px',
+      fontWeight: isCompact ? '600' : '400',
+      lineHeight: '1.35',
+      maxWidth: '100%',
+      display: '-webkit-box',
+      webkitLineClamp: isCompact ? '1' : '2',
+      webkitBoxOrient: 'vertical',
+      overflow: 'hidden',
+      background: isCompact ? 'transparent' : 'rgba(255, 255, 255, 0.06)',
+      padding: isCompact ? '0' : '4px 8px',
+      borderRadius: '6px',
+    });
 
     const reason = document.createElement('div');
     reason.textContent = decision.reason ?? '命中过滤规则';
-    reason.style.color = '#9ca3af';
-    reason.style.fontSize = '11px';
+    Object.assign(reason.style, {
+      color: '#94a3b8',
+      fontSize: isCompact ? '10px' : '11px',
+      maxWidth: '100%',
+      whiteSpace: isCompact ? 'nowrap' : 'normal',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+    });
+
+    const actions = document.createElement('div');
+    Object.assign(actions.style, {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '6px',
+      marginTop: isCompact ? '1px' : '2px',
+    });
+
+    const peekBtn = document.createElement('button');
+    peekBtn.type = 'button';
+    peekBtn.textContent = '👁 偷看原卡';
+    Object.assign(peekBtn.style, {
+      padding: isCompact ? '2px 7px' : '4px 9px',
+      borderRadius: '6px',
+      border: '1px solid rgba(148, 163, 184, 0.35)',
+      background: 'rgba(15, 23, 42, 0.7)',
+      color: '#e2e8f0',
+      fontSize: isCompact ? '10px' : '11px',
+      cursor: 'pointer',
+    });
 
     const spitBtn = document.createElement('button');
     spitBtn.type = 'button';
-    spitBtn.textContent = '吐出查看（纠偏）';
+    spitBtn.textContent = '误杀纠偏';
+    spitBtn.title = '确认误杀：恢复显示并加入白库，避免同类再被拦截';
     Object.assign(spitBtn.style, {
-      padding: '4px 10px',
+      padding: isCompact ? '2px 7px' : '4px 9px',
       borderRadius: '6px',
-      border: '1px solid rgba(255,255,255,0.2)',
-      background: 'rgba(255,255,255,0.1)',
-      color: '#fff',
-      fontSize: '12px',
+      border: '1px solid rgba(56, 189, 248, 0.45)',
+      background: 'rgba(56, 189, 248, 0.16)',
+      color: '#bae6fd',
+      fontSize: isCompact ? '10px' : '11px',
       cursor: 'pointer',
+    });
+
+    let peeking = false;
+    const applyPeekState = () => {
+      if (peeking) {
+        label.style.display = 'none';
+        itemPreview.style.display = 'none';
+        reason.style.display = 'none';
+        Object.assign(mask.style, {
+          background: 'transparent',
+          backdropFilter: 'none',
+          border: '1.5px dashed rgba(250, 204, 21, 0.75)',
+          justifyContent: 'flex-end',
+          alignItems: 'flex-end',
+          padding: '6px',
+          pointerEvents: 'none',
+        });
+        actions.style.pointerEvents = 'auto';
+        peekBtn.textContent = '🙈 重新盖上';
+        peekBtn.style.background = 'rgba(15, 23, 42, 0.92)';
+        spitBtn.style.background = 'rgba(14, 116, 144, 0.92)';
+      } else {
+        label.style.display = isCompact ? 'none' : '';
+        itemPreview.style.display = '-webkit-box';
+        reason.style.display = '';
+        Object.assign(mask.style, {
+          background: isAutoBlocked
+            ? 'rgba(12, 22, 38, 0.90)'
+            : 'rgba(20, 22, 30, 0.86)',
+          backdropFilter: 'blur(10px)',
+          border: isAutoBlocked
+            ? '1.5px solid rgba(56, 189, 248, 0.65)'
+            : '1px solid rgba(148, 163, 184, 0.25)',
+          justifyContent: 'center',
+          alignItems: 'center',
+          padding: isCompact ? '6px 8px' : '12px',
+          pointerEvents: 'auto',
+        });
+        peekBtn.textContent = '👁 偷看原卡';
+        peekBtn.style.background = 'rgba(15, 23, 42, 0.7)';
+        spitBtn.style.background = 'rgba(56, 189, 248, 0.16)';
+      }
+    };
+
+    peekBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      peeking = !peeking;
+      applyPeekState();
     });
 
     spitBtn.addEventListener('click', (e) => {
@@ -187,12 +303,188 @@ export class BilibiliAdapter implements SiteAdapter {
       callbacks.onSpit(item, element, decision.matchedAnchorId);
     });
 
-    mask.append(label, reason, spitBtn);
+    actions.append(peekBtn, spitBtn);
+    mask.append(label, itemPreview, reason, actions);
     element.appendChild(mask);
   }
 
   restoreCard(element: HTMLElement): void {
     const existing = element.querySelector(`.${MASK_CLASS}`);
     if (existing) existing.remove();
+  }
+
+  /**
+   * Render a lightweight top-left scoring badge on every evaluated card when debugMode is enabled
+   * so users can see exact negative/positive similarity scores and why a card passed or got blocked.
+   */
+  applyDebugBadge(binding: CardBinding, decision: FilterDecision, enabled: boolean): void {
+    const { element } = binding;
+    const existing = element.querySelector(`.${DEBUG_BADGE_CLASS}`);
+    if (!enabled) {
+      if (existing) existing.remove();
+      return;
+    }
+
+    const computed = window.getComputedStyle(element);
+    if (computed.position === 'static') {
+      element.style.position = 'relative';
+    }
+
+    const badge = (existing as HTMLDivElement | null) ?? document.createElement('div');
+    badge.className = DEBUG_BADGE_CLASS;
+
+    const d = decision.debug;
+    if (decision.layer === 'L1') {
+      badge.textContent = decision.blocked ? `🔴 L1拦截` : `🟢 L1放行`;
+      badge.title = decision.reason ?? 'L1 规则命中';
+    } else if (d) {
+      const icon = decision.blocked ? '🔴' : '🟢';
+      const posPart = d.effectivePos > 0 ? ` 白${d.maxPos.toFixed(2)}` : '';
+      badge.textContent = `${icon} ${decision.score.toFixed(2)} (负${d.maxNeg.toFixed(2)}${posPart})`;
+      const negLine = d.matchedNegTitle
+        ? `最像负样本：${d.matchedNegTitle} (${d.maxNeg.toFixed(3)})`
+        : `负样本最高分：${d.maxNeg.toFixed(3)}`;
+      const posLine = d.matchedPosTitle
+        ? `最像白库：${d.matchedPosTitle} (${d.maxPos.toFixed(3)}${d.effectivePos > 0 ? ' · 已生效' : ' · 未达门槛'})`
+        : `白库最高分：${d.maxPos.toFixed(3)}`;
+      badge.title = `${negLine}\n${posLine}\n最终分 ${decision.score.toFixed(3)} vs 阈值 ${d.threshold.toFixed(2)}`;
+    } else {
+      badge.textContent = decision.blocked ? '🔴 拦截' : '⚪ 未评分';
+      badge.title = decision.reason ?? '无负样本或降级放行';
+    }
+
+    Object.assign(badge.style, {
+      position: 'absolute',
+      top: '6px',
+      left: '6px',
+      zIndex: '9',
+      padding: '2px 6px',
+      borderRadius: '6px',
+      background: decision.blocked ? 'rgba(127, 29, 29, 0.88)' : 'rgba(15, 23, 42, 0.82)',
+      border: decision.blocked
+        ? '1px solid rgba(248, 113, 113, 0.65)'
+        : '1px solid rgba(148, 163, 184, 0.4)',
+      color: '#f8fafc',
+      fontSize: '10px',
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      lineHeight: '1.3',
+      pointerEvents: 'auto',
+      cursor: 'help',
+      backdropFilter: 'blur(4px)',
+    });
+
+    if (!existing) {
+      element.appendChild(badge);
+    }
+  }
+
+  clearAllDebugBadges(): void {
+    document.querySelectorAll(`.${DEBUG_BADGE_CLASS}`).forEach((el) => el.remove());
+  }
+
+  /**
+   * Detect and hide sidebar ad containers (e.g. on /video/ pages) and standalone floor promo cards.
+   * Homepage feed items (`ad`, `live`, `ogv`, `manga`, etc.) are filtered cleanly at the API layer
+   * in `bilibili-feed-proxy.content.ts` so homepage grid layout and skeleton loading stay intact.
+   */
+  eatAdCards(hideAds: boolean, hideFloorCards = true): number {
+    if (!hideAds) {
+      document.querySelectorAll<HTMLElement>('[data-afp-hidden-kind="ad"]').forEach((el) => {
+        el.style.display = '';
+        delete el.dataset.afpHiddenKind;
+      });
+    }
+    if (!hideFloorCards) {
+      document.querySelectorAll<HTMLElement>('[data-afp-hidden-kind="floor"]').forEach((el) => {
+        el.style.display = '';
+        delete el.dataset.afpHiddenKind;
+      });
+    }
+    if (!hideAds && !hideFloorCards) return 0;
+
+    let hiddenNow = 0;
+
+    // On /video/ pages, hide explicit sidebar ad cards safely.
+    if (hideAds) {
+      const sidebarAds = document.querySelectorAll<HTMLElement>(
+        '.video-card-ad-small, .ad-report, .slide-ad-exp, .ad-floor-exp',
+      );
+      for (const el of sidebarAds) {
+        if (el.closest('#biliMainHeader, .bili-header, header')) continue;
+        if (el.dataset.afpHiddenKind) continue;
+        el.dataset.afpHiddenKind = 'ad';
+        el.style.display = 'none';
+        hiddenNow += 1;
+      }
+    }
+
+    // Hide standalone non-video floor cards (.floor-single-card) if any were SSR-rendered.
+    if (hideFloorCards) {
+      const floorCards = document.querySelectorAll<HTMLElement>('.floor-single-card');
+      for (const el of floorCards) {
+        if (el.closest('#biliMainHeader, .bili-header, header')) continue;
+        if (el.dataset.afpHiddenKind) continue;
+        el.dataset.afpHiddenKind = 'floor';
+        el.style.display = 'none';
+        hiddenNow += 1;
+      }
+    }
+
+    return hiddenNow;
+  }
+
+  /**
+   * Best-effort trigger for Bilibili's native "不感兴趣" button on homepage feed cards
+   * so Bilibili's own recommendation algorithm also learns to stop pushing similar videos.
+   */
+  async triggerNativeNotInterested(element: HTMLElement): Promise<boolean> {
+    try {
+      const triggerSelectors = [
+        '.bili-video-card__info--no-interest',
+        '[class*="no-interest"]',
+        '[title*="不感兴趣"]',
+        '[aria-label*="不感兴趣"]',
+        '.bili-video-card__info--menu',
+      ];
+      let trigger: HTMLElement | null = null;
+      for (const sel of triggerSelectors) {
+        const candidate = element.querySelector<HTMLElement>(sel);
+        if (
+          candidate &&
+          !candidate.classList.contains(FEED_BTN_CLASS) &&
+          !candidate.closest(`.${MASK_CLASS}`)
+        ) {
+          trigger = candidate;
+          break;
+        }
+      }
+      if (!trigger) return false;
+
+      const directHit =
+        trigger.className.includes('no-interest') ||
+        (trigger.title ?? '').includes('不感兴趣') ||
+        (trigger.getAttribute('aria-label') ?? '').includes('不感兴趣');
+
+      trigger.click();
+
+      // Wait briefly for Bilibili's dislike popover menu to render, then pick "不感兴趣".
+      await new Promise((resolve) => window.setTimeout(resolve, 90));
+
+      const menuCandidates = document.querySelectorAll<HTMLElement>(
+        '.bili-video-card__info--no-interest--panel *, .bili-popover *, [class*="dislike"] *, [class*="no-interest"] *',
+      );
+      for (const node of menuCandidates) {
+        if (node.children.length > 0) continue;
+        const txt = node.textContent?.trim() ?? '';
+        if (txt.includes('不感兴趣') && !txt.includes('UP主') && !txt.includes('up主')) {
+          node.click();
+          return true;
+        }
+      }
+
+      return directHit;
+    } catch {
+      return false;
+    }
   }
 }

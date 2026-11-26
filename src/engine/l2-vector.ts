@@ -101,6 +101,7 @@ export function scoreAgainstAnchors(
   let matchedAnchorId: string | undefined;
   let matchedTitle: string | undefined;
   let maxPosScore = 0;
+  let matchedPosTitle: string | undefined;
 
   for (const anchor of anchors) {
     // Never compare vectors from different embedding spaces.
@@ -117,11 +118,14 @@ export function scoreAgainstAnchors(
       }
     } else if (sim > maxPosScore) {
       maxPosScore = sim;
+      matchedPosTitle = anchor.text?.split(' | ')[0];
     }
   }
 
   const threshold = getEffectiveThreshold(config, mode);
-  const boundaryScore = maxNegScore - config.positiveAlpha * maxPosScore;
+  const minPosSim = mode === 'ngram' ? Math.max(0.35, config.positiveMinSim - 0.35) : config.positiveMinSim;
+  const effectivePos = maxPosScore >= minPosSim ? maxPosScore : 0;
+  const boundaryScore = maxNegScore - config.positiveAlpha * effectivePos;
   const blocked = boundaryScore > threshold;
 
   const shortTitle = matchedTitle
@@ -139,5 +143,13 @@ export function scoreAgainstAnchors(
       : undefined,
     matchedAnchorId: blocked ? matchedAnchorId : undefined,
     matchedTitle: blocked ? matchedTitle : undefined,
+    debug: {
+      maxNeg: Number(maxNegScore.toFixed(3)),
+      maxPos: Number(maxPosScore.toFixed(3)),
+      effectivePos: Number(effectivePos.toFixed(3)),
+      threshold: Number(threshold.toFixed(2)),
+      matchedNegTitle: matchedTitle,
+      matchedPosTitle,
+    },
   };
 }

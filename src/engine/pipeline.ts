@@ -68,35 +68,40 @@ export async function evaluateBatch(
     hasNegativeAnchors &&
     ctx.provider?.isReady()
   ) {
-    try {
-      const texts = pendingForL2.map(buildEmbeddingText);
-      const embeddings = await withTimeout(
-        ctx.provider.embedTexts(texts),
-        ctx.config.inferenceTimeoutMs,
-      );
-      for (let i = 0; i < pendingForL2.length; i++) {
-        const item = pendingForL2[i];
-        const decision = scoreAgainstAnchors(
-          item.item_id,
-          embeddings[i],
-          ctx.anchors,
-          ctx.config,
-          Date.now(),
-          activeMode,
+    const CHUNK_SIZE = 8;
+    for (let start = 0; start < pendingForL2.length; start += CHUNK_SIZE) {
+      const chunk = pendingForL2.slice(start, start + CHUNK_SIZE);
+      try {
+        const texts = chunk.map(buildEmbeddingText);
+        const embeddings = await withTimeout(
+          ctx.provider.embedTexts(texts),
+          ctx.config.inferenceTimeoutMs,
         );
-        decisionMap.set(item.item_id, decision);
-      }
-    } catch {
-      // Fail-Open: never block feed rendering when local inference fails or times out.
-      degraded = true;
-      for (const item of pendingForL2) {
-        decisionMap.set(item.item_id, {
-          item_id: item.item_id,
-          blocked: false,
-          layer: 'FAIL_OPEN',
-          score: 0,
-          reason: '本地推理降级放行',
-        });
+        for (let i = 0; i < chunk.length; i++) {
+          const item = chunk[i];
+          const decision = scoreAgainstAnchors(
+            item.item_id,
+            embeddings[i],
+            ctx.anchors,
+            ctx.config,
+            Date.now(),
+            activeMode,
+          );
+          decisionMap.set(item.item_id, decision);
+        }
+      } catch (err) {
+        // Fail-Open: never block feed rendering when local inference fails or times out.
+        console.warn('[AFP] L2 chunk inference failed/timed out:', err);
+        degraded = true;
+        for (const item of chunk) {
+          decisionMap.set(item.item_id, {
+            item_id: item.item_id,
+            blocked: false,
+            layer: 'FAIL_OPEN',
+            score: 0,
+            reason: '本地推理降级放行',
+          });
+        }
       }
     }
   } else {

@@ -22,5 +22,11 @@ export default defineConfig({
       extension_pages:
         "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';",
     },
+    web_accessible_resources: [
+      {
+        resources: ['pets/*'],
+        matches: ['*://*.bilibili.com/*'],
+      },
+    ],
   },
 });

@@ -11,8 +11,16 @@ import {
 import { NgramEmbeddingProvider } from '@/engine/ngram-embedder';
 import { evaluateBatch } from '@/engine/pipeline';
 import { db, todayKey } from '@/storage/db';
+import type { SyncSnapshot } from '@/storage/sync-codec';
 import { DEFAULT_FILTER_CONFIG, type FilterConfig } from '@/types/item';
-import type { ExtensionMessage, PetStatus, RecentEatenEntry } from '@/types/messages';
+import type {
+  ExportDataResponse,
+  ExtensionMessage,
+  ImportDataResponse,
+  PetDataBackup,
+  PetStatus,
+  RecentEatenEntry,
+} from '@/types/messages';
 
 const MODEL_ID = 'Xenova/bge-small-zh-v1.5';
 const REMOTE_HOSTS = ['https://hf-mirror.com/', 'https://huggingface.co/'];
@@ -23,6 +31,13 @@ env.allowLocalModels = false;
 env.useBrowserCache = true;
 // MV3 extension pages cannot load scripts from CDN or use SharedArrayBuffer;
 // serve ONNX Runtime Web assets locally from chrome-extension://<id>/ort/ in single-threaded mode.
+if (env.backends?.onnx) {
+  // Suppress harmless ONNX Runtime WebGPU startup warnings so Chrome doesn't flag them as extension errors.
+  env.backends.onnx.logLevel = 'error';
+  if (env.backends.onnx.webgpu) {
+    env.backends.onnx.webgpu.powerPreference = undefined;
+  }
+}
 if (env.backends?.onnx?.wasm) {
   env.backends.onnx.wasm.wasmPaths = new URL('/ort/', browser.runtime.getURL('/')).href;
   env.backends.onnx.wasm.numThreads = 1;
@@ -54,15 +69,17 @@ class TransformersEmbeddingProvider implements InferenceProvider {
         env.remoteHost = host;
         for (const device of devices) {
           try {
+            console.info(`[AFP] Loading ${MODEL_ID} from ${host} (${device})...`);
             const loaded = await pipeline('feature-extraction', MODEL_ID, {
               device,
               dtype: 'q8',
             });
             this.extractor = loaded as unknown as FeatureExtractionPipeline;
             this.backend = device;
+            console.info(`[AFP] Loaded ${MODEL_ID} on ${device}`);
             return true;
-          } catch {
-            // Try next device or mirror host.
+          } catch (err) {
+            console.warn(`[AFP] Failed to load ${MODEL_ID} from ${host} (${device}):`, err);
           }
         }
       }
@@ -136,7 +153,21 @@ async function loadStateFromDb(): Promise<void> {
 
   const storedCfg = readConfigFromStorage();
   if (storedCfg) {
-    config = { ...DEFAULT_FILTER_CONFIG, ...storedCfg };
+    const isLegacyPositiveCfg =
+      storedCfg.positiveMinSim === undefined && storedCfg.positiveAlpha === 0.35;
+    config = {
+      ...DEFAULT_FILTER_CONFIG,
+      ...storedCfg,
+      positiveAlpha: isLegacyPositiveCfg
+        ? DEFAULT_FILTER_CONFIG.positiveAlpha
+        : (storedCfg.positiveAlpha ?? DEFAULT_FILTER_CONFIG.positiveAlpha),
+      positiveMinSim: storedCfg.positiveMinSim ?? DEFAULT_FILTER_CONFIG.positiveMinSim,
+      // Upgrade legacy 500ms timeout that caused large search pages to fail-open.
+      inferenceTimeoutMs: Math.max(
+        storedCfg.inferenceTimeoutMs ?? DEFAULT_FILTER_CONFIG.inferenceTimeoutMs,
+        DEFAULT_FILTER_CONFIG.inferenceTimeoutMs,
+      ),
+    };
   }
 
   const nextRules = createEmptyRuleSet();
@@ -357,27 +388,284 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
     }
 
     case 'GET_STATUS': {
-      const [stat, negRecords] = await Promise.all([
+      const [stat, negRecords, allRules] = await Promise.all([
         db.stats.get(todayKey()),
         db.vectors.where('polarity').equals('negative').toArray(),
+        db.rules.toArray(),
       ]);
       const texts = [
         ...negRecords.map((v) => v.text),
         ...recentEaten.map((e) => e.title),
       ];
+      const rules = allRules
+        .filter(
+          (r): r is typeof r & { id: number; kind: 'keyword' | 'author_block' } =>
+            typeof r.id === 'number' &&
+            (r.kind === 'keyword' || r.kind === 'author_block'),
+        )
+        .map((r) => ({ id: r.id, kind: r.kind, value: r.value }));
+      const positiveAnchors = cachedAnchors
+        .filter((a) => a.polarity === 'positive')
+        .map((a) => ({
+          id: a.id,
+          title: (a.text?.split(' | ')[0] ?? a.id).slice(0, 26),
+        }));
       const status: PetStatus = {
         modelReady: neuralProvider.isReady(),
         modelLoading: neuralProvider.loading,
         backend: neuralProvider.backend ?? 'ngram',
         todayEaten: stat?.eatenCount ?? 0,
         negativeCount: cachedAnchors.filter((a) => a.polarity === 'negative').length,
-        positiveCount: cachedAnchors.filter((a) => a.polarity === 'positive').length,
+        positiveCount: positiveAnchors.length,
         authorFeedCounts,
         topKeywords: extractTopKeywords(texts, 12),
         recentEaten: recentEaten.slice(0, 10),
+        rules,
+        positiveAnchors,
         config,
       };
       return status;
+    }
+
+    case 'REMOVE_VECTOR': {
+      await db.vectors.delete(msg.id);
+      await loadStateFromDb();
+      return { ok: true };
+    }
+
+    case 'ADD_RULE': {
+      const rawValues =
+        msg.kind === 'keyword'
+          ? msg.value.split(/[,，\n]/).map((s) => s.trim())
+          : [msg.value.trim()];
+      const values = rawValues.filter((v) => v.length > 0);
+      const now = Date.now();
+      let added = 0;
+
+      for (const value of values) {
+        const existing = await db.rules
+          .where('[kind+value]')
+          .equals([msg.kind, value])
+          .first();
+        if (!existing) {
+          await db.rules.add({
+            kind: msg.kind,
+            value,
+            hitCount: 0,
+            createdAt: now,
+          });
+          added += 1;
+        }
+      }
+
+      await loadStateFromDb();
+      return { ok: true, added };
+    }
+
+    case 'REMOVE_RULE': {
+      await db.rules.delete(msg.id);
+      await loadStateFromDb();
+      return { ok: true };
+    }
+
+    case 'EXPORT_DATA': {
+      const [vectors, rules, stats] = await Promise.all([
+        db.vectors.toArray(),
+        db.rules.toArray(),
+        db.stats.toArray(),
+      ]);
+      const data: PetDataBackup = {
+        schemaVersion: 1,
+        exportedAt: new Date().toISOString(),
+        config,
+        vectors,
+        rules,
+        stats,
+      };
+      const res: ExportDataResponse = { ok: true, data };
+      return res;
+    }
+
+    case 'IMPORT_DATA': {
+      const payload = msg.data;
+      if (!payload || !Array.isArray(payload.vectors)) {
+        const res: ImportDataResponse = {
+          ok: false,
+          importedVectors: 0,
+          importedRules: 0,
+          error: '备份文件格式不正确（缺少 vectors 数组）',
+        };
+        return res;
+      }
+
+      const mode = msg.mode ?? 'merge';
+      const validVectors = payload.vectors.filter(
+        (v) =>
+          v &&
+          typeof v.id === 'string' &&
+          (v.polarity === 'negative' || v.polarity === 'positive') &&
+          typeof v.text === 'string' &&
+          Array.isArray(v.embedding) &&
+          v.embedding.length > 0,
+      );
+      const validRules = Array.isArray(payload.rules)
+        ? payload.rules.filter(
+            (r) => r && typeof r.kind === 'string' && typeof r.value === 'string',
+          )
+        : [];
+      const validStats = Array.isArray(payload.stats)
+        ? payload.stats.filter((s) => s && typeof s.date === 'string')
+        : [];
+
+      if (mode === 'replace') {
+        await Promise.all([db.vectors.clear(), db.rules.clear(), db.stats.clear()]);
+      }
+
+      if (validVectors.length > 0) {
+        await db.vectors.bulkPut(validVectors);
+      }
+
+      let importedRules = 0;
+      for (const rule of validRules) {
+        const existing = await db.rules
+          .where('[kind+value]')
+          .equals([rule.kind, rule.value])
+          .first();
+        if (!existing) {
+          const { id: _ignored, ...rest } = rule;
+          await db.rules.add(rest);
+          importedRules += 1;
+        }
+      }
+
+      for (const stat of validStats) {
+        const existing = await db.stats.get(stat.date);
+        if (!existing) {
+          await db.stats.put(stat);
+        } else {
+          await db.stats.update(stat.date, {
+            eatenCount: Math.max(existing.eatenCount, stat.eatenCount),
+            spitCount: Math.max(existing.spitCount, stat.spitCount),
+          });
+        }
+      }
+
+      if (payload.config && typeof payload.config === 'object') {
+        config = { ...config, ...payload.config };
+        writeConfigToStorage(config);
+      }
+
+      await pruneNegativeBankIfNeeded();
+      await loadStateFromDb();
+      if (neuralProvider.isReady()) {
+        void upgradeNgramVectorsToNeural();
+      }
+
+      const res: ImportDataResponse = {
+        ok: true,
+        importedVectors: validVectors.length,
+        importedRules,
+      };
+      return res;
+    }
+
+    case 'GET_SYNC_SNAPSHOT': {
+      const [vectors, rules] = await Promise.all([
+        db.vectors.toArray(),
+        db.rules.toArray(),
+      ]);
+      const snapshot: SyncSnapshot = {
+        version: 1,
+        updatedAt: Date.now(),
+        config,
+        rules: rules
+          .filter(
+            (r): r is typeof r & { kind: 'keyword' | 'author_block' | 'author_allow' } =>
+              r.kind === 'keyword' || r.kind === 'author_block' || r.kind === 'author_allow',
+          )
+          .map((r) => ({ k: r.kind, v: r.value })),
+        vectors: vectors.map((v) => ({
+          id: v.id,
+          p: v.polarity === 'positive' ? 'p' : 'n',
+          pl: v.platform,
+          iid: v.itemId,
+          t: v.text.slice(0, 120),
+          w: v.weight,
+          c: v.createdAt,
+          l: v.lastHitAt,
+        })),
+      };
+      return { ok: true, snapshot };
+    }
+
+    case 'APPLY_SYNC_SNAPSHOT': {
+      const snap = msg.snapshot;
+      if (!snap || snap.version !== 1) return { ok: false, pulledVectors: 0 };
+
+      const [existingVectors, existingRules] = await Promise.all([
+        db.vectors.toArray(),
+        db.rules.toArray(),
+      ]);
+      const existingVecIds = new Set(existingVectors.map((v) => v.id));
+      const existingRuleKeys = new Set(existingRules.map((r) => `${r.kind}:${r.value}`));
+
+      // Merge remote rules.
+      const now = Date.now();
+      for (const r of snap.rules) {
+        if (!existingRuleKeys.has(`${r.k}:${r.v}`)) {
+          await db.rules.add({
+            kind: r.k,
+            value: r.v,
+            hitCount: 0,
+            createdAt: now,
+          });
+        }
+      }
+
+      // Merge config if local has no vectors yet (fresh device) or missing keys.
+      if (snap.config && existingVectors.length === 0) {
+        config = { ...config, ...snap.config };
+        writeConfigToStorage(config);
+      }
+
+      // Re-embed any missing synced vectors locally.
+      const missing = snap.vectors.filter((v) => !existingVecIds.has(v.id) && v.t.trim().length > 0);
+      let pulledVectors = 0;
+      if (missing.length > 0) {
+        const provider = getActiveProvider();
+        const CHUNK = 16;
+        for (let i = 0; i < missing.length; i += CHUNK) {
+          const slice = missing.slice(i, i + CHUNK);
+          try {
+            const embeddings = await provider.embedTexts(slice.map((s) => s.t));
+            for (let j = 0; j < slice.length; j++) {
+              const s = slice[j];
+              await db.vectors.put({
+                id: s.id,
+                polarity: s.p === 'p' ? 'positive' : 'negative',
+                platform: s.pl,
+                itemId: s.iid,
+                text: s.t,
+                embedding: Array.from(embeddings[j]),
+                embedder: provider.mode ?? 'neural',
+                weight: s.w,
+                createdAt: s.c,
+                lastHitAt: s.l,
+              });
+              pulledVectors += 1;
+            }
+          } catch {
+            // Skip failed chunk.
+          }
+        }
+      }
+
+      await pruneNegativeBankIfNeeded();
+      await loadStateFromDb();
+      if (neuralProvider.isReady()) {
+        void upgradeNgramVectorsToNeural();
+      }
+      return { ok: true, pulledVectors };
     }
   }
 }

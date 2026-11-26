@@ -164,3 +164,40 @@ describe('Offline N-gram vector fallback', () => {
     expect(result.decisions[1].blocked).toBe(false);
   });
 });
+
+import { packSyncSnapshot, unpackSyncSnapshot } from '@/storage/sync-codec';
+
+describe('Chrome storage.sync chunk codec', () => {
+  it('splits large vector banks into <8KB chunks and round-trips losslessly', () => {
+    const vectors = Array.from({ length: 120 }, (_, i) => ({
+      id: `neg:bilibili:BV${i}`,
+      p: (i % 15 === 0 ? 'p' : 'n') as 'n' | 'p',
+      pl: 'bilibili' as const,
+      iid: `BV${i}`,
+      t: `测试样本标题编号${i}，用于验证 Chrome Sync 分片编码和解码不会超过单片 8KB 限制`,
+      w: 1,
+      c: 1795651200000 + i,
+      l: 1795651200000 + i,
+    }));
+
+    const { items, chunkCount } = packSyncSnapshot({
+      version: 1,
+      updatedAt: 1795699999000,
+      config: { l2Threshold: 0.72, positiveAlpha: 0.18 },
+      rules: [{ k: 'keyword', v: '保姆级' }],
+      vectors,
+    });
+
+    expect(chunkCount).toBeGreaterThan(1);
+    for (const val of Object.values(items)) {
+      const size = new TextEncoder().encode(JSON.stringify(val)).length;
+      expect(size).toBeLessThan(8192);
+    }
+
+    const restored = unpackSyncSnapshot(items);
+    expect(restored).not.toBeNull();
+    expect(restored!.vectors.length).toBe(120);
+    expect(restored!.rules).toEqual([{ k: 'keyword', v: '保姆级' }]);
+    expect(restored!.config.l2Threshold).toBe(0.72);
+  });
+});

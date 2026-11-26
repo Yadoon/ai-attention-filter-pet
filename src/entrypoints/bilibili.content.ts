@@ -3,9 +3,13 @@ import type { AdapterCallbacks, CardBinding } from '@/adapters/base';
 import type { NormalizedItem } from '@/types/item';
 import type {
   EvaluateBatchResponse,
+  ExportDataResponse,
   ExtensionMessage,
   FeedItemResponse,
+  ImportDataResponse,
+  PetDataBackup,
   PetStatus,
+  SyncNowResponse,
 } from '@/types/messages';
 import { FloatingPetController } from '@/ui/floating-pet';
 
@@ -95,12 +99,42 @@ export default defineContentScript({
   main() {
     const adapter = new BilibiliAdapter();
     const apiCache = new Map<string, NormalizedItem>();
-    let rafPending = false;
+    let rescanTimer: number | null = null;
+    let syncNativeDislike = true;
+    let debugMode = false;
+    let hideAds = true;
+    let hideFloorCards = true;
+
+    const syncProxyFlags = () => {
+      document.documentElement.dataset.afpHideAds = hideAds ? '1' : '0';
+      document.documentElement.dataset.afpHideFloor = hideFloorCards ? '1' : '0';
+    };
+    syncProxyFlags();
+
+    const scheduleRescanVisible = (delayMs = 150) => {
+      if (rescanTimer !== null) {
+        window.clearTimeout(rescanTimer);
+      }
+      rescanTimer = window.setTimeout(() => {
+        rescanTimer = null;
+        const bindings = adapter.scanCards(apiCache, true);
+        void processBindings(bindings);
+      }, delayMs);
+    };
 
     const refreshPetStatus = () => {
       void sendMessage<PetStatus>({ type: 'GET_STATUS' })
         .then((status) => {
-          if (status) pet.syncStatus(status);
+          if (status && typeof status.todayEaten === 'number') {
+            syncNativeDislike = status.config.syncNativeDislike ?? true;
+            debugMode = status.config.debugMode ?? false;
+            hideAds = status.config.hideAds ?? true;
+            hideFloorCards = status.config.hideFloorCards ?? true;
+            syncProxyFlags();
+            pet.syncStatus(status);
+          } else {
+            pet.setDegraded(true);
+          }
         })
         .catch(() => {
           pet.setDegraded(true);
@@ -108,17 +142,82 @@ export default defineContentScript({
     };
 
     const pet = new FloatingPetController({
-      onThresholdChange: (value) => {
-        void sendMessage({ type: 'UPDATE_CONFIG', patch: { l2Threshold: value } });
+      onConfigPatch: (patch, rescan) => {
+        if (typeof patch.debugMode === 'boolean') {
+          debugMode = patch.debugMode;
+          if (!debugMode) {
+            adapter.clearAllDebugBadges();
+          }
+        }
+        if (typeof patch.hideAds === 'boolean' || typeof patch.hideFloorCards === 'boolean') {
+          if (typeof patch.hideAds === 'boolean') hideAds = patch.hideAds;
+          if (typeof patch.hideFloorCards === 'boolean') hideFloorCards = patch.hideFloorCards;
+          syncProxyFlags();
+          const eatenPromos = adapter.eatAdCards(hideAds, hideFloorCards);
+          if (eatenPromos > 0) {
+            pet.triggerEat(eatenPromos, `⚡ 清理推广 +${eatenPromos}`);
+          }
+        }
+        void sendMessage({ type: 'UPDATE_CONFIG', patch }).then(() => {
+          if (rescan) scheduleRescanVisible(patch.debugMode !== undefined ? 60 : 260);
+        });
+      },
+      onSkinChange: (skinId) => {
+        void sendMessage({ type: 'UPDATE_CONFIG', patch: { petSkin: skinId } });
+      },
+      onSyncNativeDislikeChange: (enabled) => {
+        syncNativeDislike = enabled;
+        void sendMessage({ type: 'UPDATE_CONFIG', patch: { syncNativeDislike: enabled } });
+      },
+      onAddRule: async (kind, value) => {
+        await sendMessage({ type: 'ADD_RULE', kind, value });
+        refreshPetStatus();
+        scheduleRescanVisible(100);
+      },
+      onRemoveRule: async (id) => {
+        await sendMessage({ type: 'REMOVE_RULE', id });
+        refreshPetStatus();
+      },
+      onRemoveVector: async (id) => {
+        await sendMessage({ type: 'REMOVE_VECTOR', id });
+        refreshPetStatus();
+        scheduleRescanVisible(100);
       },
       onRequestRefreshStatus: refreshPetStatus,
+      onExportData: () => sendMessage<ExportDataResponse>({ type: 'EXPORT_DATA' }),
+      onImportData: async (data: PetDataBackup) => {
+        const res = await sendMessage<ImportDataResponse>({
+          type: 'IMPORT_DATA',
+          data,
+          mode: 'merge',
+        });
+        if (res?.ok) {
+          scheduleRescanVisible(150);
+        }
+        return res;
+      },
+      onSyncNow: async () => {
+        const res = await sendMessage<SyncNowResponse>({ type: 'SYNC_NOW' });
+        if (res?.ok && res.pulledVectors > 0) {
+          scheduleRescanVisible(150);
+        }
+        return res;
+      },
     });
     pet.mount();
     refreshPetStatus();
 
     window.addEventListener('message', (event) => {
       if (event.origin !== window.location.origin) return;
-      const data = event.data as { source?: string; items?: NormalizedItem[] } | null;
+      const data = event.data as {
+        source?: string;
+        items?: NormalizedItem[];
+        removed?: number;
+      } | null;
+      if (data?.source === 'afp-rcmd-filtered' && typeof data.removed === 'number' && data.removed > 0) {
+        pet.triggerEat(data.removed, `⚡ 接口拦截推广 +${data.removed}`);
+        return;
+      }
       if (data?.source !== HOOK_SOURCE || !Array.isArray(data.items)) return;
       for (const item of data.items) {
         apiCache.set(item.item_id, item);
@@ -128,6 +227,10 @@ export default defineContentScript({
 
     const callbacks: AdapterCallbacks = {
       onFeed: async (item, element) => {
+        const nativeDislikePromise = syncNativeDislike
+          ? adapter.triggerNativeNotInterested(element)
+          : Promise.resolve(false);
+
         adapter.applyMask(
           { element, item },
           {
@@ -139,16 +242,21 @@ export default defineContentScript({
           },
           callbacks,
         );
-        pet.triggerEat(1, '嚼嚼 +1');
+        pet.triggerEat(1);
 
         try {
-          const res = await sendMessage<FeedItemResponse>({
-            type: 'FEED_ITEM',
-            item,
-          });
+          const [res, syncedNative] = await Promise.all([
+            sendMessage<FeedItemResponse>({
+              type: 'FEED_ITEM',
+              item,
+            }),
+            nativeDislikePromise,
+          ]);
           refreshPetStatus();
+          scheduleRescanVisible(200);
+          const syncSuffix = syncedNative ? '（已同步 B 站不感兴趣）' : '';
           showUndoToast(
-            `🐾 宠物吃掉了《${item.title.slice(0, 18)}…》`,
+            `🐾 宠物吃掉了《${item.title.slice(0, 16)}…》${syncSuffix}`,
             () => {
               adapter.restoreCard(element);
               pet.triggerSpit();
@@ -196,16 +304,21 @@ export default defineContentScript({
           type: 'EVALUATE_BATCH',
           items: bindings.map((b) => b.item),
         });
-        pet.setDegraded(Boolean(response?.degraded));
+        if (response?.degraded) {
+          pet.setDegraded(true);
+        }
         const decisionById = new Map(
           (response?.decisions ?? []).map((d) => [d.item_id, d]),
         );
         let autoBlocked = 0;
         for (const binding of bindings) {
           const decision = decisionById.get(binding.item.item_id);
-          if (decision?.blocked) {
-            adapter.applyMask(binding, decision, callbacks);
-            autoBlocked += 1;
+          if (decision) {
+            adapter.applyDebugBadge(binding, decision, debugMode);
+            if (decision.blocked) {
+              adapter.applyMask(binding, decision, callbacks);
+              autoBlocked += 1;
+            }
           }
         }
         if (autoBlocked > 0) {
@@ -218,18 +331,57 @@ export default defineContentScript({
       }
     }
 
-    function scheduleScan(): void {
-      if (rafPending) return;
-      rafPending = true;
-      window.requestAnimationFrame(() => {
-        rafPending = false;
+    let scanTimer: number | null = null;
+    let hydrationReady = false;
+
+    function scheduleScan(delayMs = 180): void {
+      if (!hydrationReady) return;
+      if (scanTimer !== null) return;
+      scanTimer = window.setTimeout(() => {
+        scanTimer = null;
+        const eatenPromos = adapter.eatAdCards(hideAds, hideFloorCards);
+        if (eatenPromos > 0) {
+          pet.triggerEat(eatenPromos, `⚡ 清理推广 +${eatenPromos}`);
+        }
         const bindings = adapter.scanCards(apiCache);
         void processBindings(bindings);
-      });
+      }, delayMs);
     }
 
-    const observer = new MutationObserver(() => scheduleScan());
+    const startScanning = () => {
+      // Give Bilibili's Vue 3 SSR hydration time to finish before injecting buttons/masks
+      // into SSR-rendered cards, otherwise Vue hydration can mismatch and drop #biliMainHeader.
+      const settleMs = window.location.pathname.startsWith('/video/') ? 900 : 350;
+      window.setTimeout(() => {
+        hydrationReady = true;
+        scheduleScan(0);
+      }, settleMs);
+    };
+
+    const observer = new MutationObserver((mutations) => {
+      if (!hydrationReady) return;
+      const hasExternalChange = mutations.some((m) => {
+        const target = m.target as HTMLElement | null;
+        if (!target) return false;
+        if (
+          target.id === 'afp-floating-pet-host' ||
+          target.id === 'afp-undo-toast' ||
+          target.classList?.contains('afp-card-mask')
+        ) {
+          return false;
+        }
+        return true;
+      });
+      if (hasExternalChange) {
+        scheduleScan(180);
+      }
+    });
     observer.observe(document.body, { childList: true, subtree: true });
-    scheduleScan();
+
+    if (document.readyState === 'complete') {
+      startScanning();
+    } else {
+      window.addEventListener('load', startScanning, { once: true });
+    }
   },
 });

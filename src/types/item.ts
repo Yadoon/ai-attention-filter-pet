@@ -1,3 +1,5 @@
+import type { PetSkinId } from '@/ui/pet-skins';
+
 export type Platform = 'bilibili' | 'xiaohongshu' | 'douyin';
 
 export type MediaType = 'video' | 'short_video' | 'image_text';
@@ -34,6 +36,15 @@ export interface NormalizedItem {
 
 export type FilterLayer = 'L1' | 'L2' | 'L3' | 'FAIL_OPEN';
 
+export interface FilterDecisionDebug {
+  maxNeg: number;
+  maxPos: number;
+  effectivePos: number;
+  threshold: number;
+  matchedNegTitle?: string;
+  matchedPosTitle?: string;
+}
+
 export interface FilterDecision {
   item_id: string;
   blocked: boolean;
@@ -44,6 +55,8 @@ export interface FilterDecision {
   matchedAnchorId?: string;
   /** Short title of the matched negative anchor for user-facing transparency. */
   matchedTitle?: string;
+  /** Detailed scoring breakdown for optional debug overlay. */
+  debug?: FilterDecisionDebug;
 }
 
 export interface FilterConfig {
@@ -51,15 +64,33 @@ export interface FilterConfig {
   l2Threshold: number;
   /** Repulsion coefficient for positive whitelist anchors. */
   positiveAlpha: number;
+  /** Minimum similarity to a positive anchor before whitelist protection activates. */
+  positiveMinSim: number;
   /** Timeout (ms) before L2 inference fails open. */
   inferenceTimeoutMs: number;
   /** Whether L2 semantic vector filtering is enabled. */
   enableL2: boolean;
+  /** Active companion pet avatar skin. */
+  petSkin: PetSkinId;
+  /** Also click Bilibili's native "not interested" action when feeding a card. */
+  syncNativeDislike: boolean;
+  /** Show per-card scoring breakdown badges for debugging & tuning. */
+  debugMode: boolean;
+  /** Automatically eat and hide Bilibili native ad cards. */
+  hideAds: boolean;
+  /** Automatically hide non-video floor/promo cards (live, drama, documentary, manga, etc.). */
+  hideFloorCards: boolean;
 }
 
 export const DEFAULT_FILTER_CONFIG: FilterConfig = {
   l2Threshold: 0.78,
-  positiveAlpha: 0.35,
-  inferenceTimeoutMs: 500,
+  positiveAlpha: 0.18,
+  positiveMinSim: 0.82,
+  inferenceTimeoutMs: 4000,
   enableL2: true,
+  petSkin: 'pikachu',
+  syncNativeDislike: true,
+  debugMode: false,
+  hideAds: true,
+  hideFloorCards: true,
 };
