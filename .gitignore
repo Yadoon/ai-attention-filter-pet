@@ -221,3 +221,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Node & WXT browser extension build artifacts
+node_modules/
+.wxt/
+.output/
+*.tsbuildinfo
