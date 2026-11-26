@@ -9,6 +9,8 @@ export interface VectorRecord {
   text: string;
   /** L2-normalized embedding stored as plain number array for IndexedDB portability. */
   embedding: number[];
+  /** Which embedder produced this vector ('neural' for bge-small-zh, 'ngram' for offline fallback). */
+  embedder?: 'neural' | 'ngram';
   /** Weight in (0, 1]; down-weighted when a user spits out a false positive. */
   weight: number;
   createdAt: number;

@@ -25,10 +25,12 @@ export default function App() {
 
   const backendLabel =
     status?.backend === 'webgpu'
-      ? 'WebGPU 本地加速'
+      ? 'WebGPU 语义加速'
       : status?.backend === 'wasm'
-        ? 'WASM 本地运行'
-        : '轻装规则模式（模型加载中）';
+        ? 'WASM 语义加速'
+        : status?.modelLoading
+          ? '词面向量（模型下载中…）'
+          : '词面向量模式（离线可用）';
 
   return (
     <div className="w-80 p-4 bg-slate-950 text-slate-100 space-y-4">

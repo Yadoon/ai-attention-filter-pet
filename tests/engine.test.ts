@@ -109,6 +109,8 @@ describe('Pipeline Fail-Open degradation', () => {
   });
 });
 
+import { NgramEmbeddingProvider } from '@/engine/ngram-embedder';
+
 describe('Local junk word cloud extractor', () => {
   it('extracts frequent meaningful tokens while filtering stop words', () => {
     const keywords = extractTopKeywords([
@@ -122,5 +124,43 @@ describe('Local junk word cloud extractor', () => {
     expect(keywords.some((k) => k.word === '震惊' && k.count === 2)).toBe(true);
     expect(keywords.some((k) => k.word === '批量' && k.count === 2)).toBe(true);
     expect(keywords.some((k) => k.word === '的' || k.word === '怎么')).toBe(false);
+  });
+});
+
+describe('Offline N-gram vector fallback', () => {
+  it('auto-blocks similar titles immediately even without neural model loaded', async () => {
+    const ngram = new NgramEmbeddingProvider();
+    const fedTitle = '小米最难三季报！利润少一半到底发生了啥？';
+    const [fedVec] = await ngram.embedTexts([fedTitle]);
+
+    const anchors: AnchorVector[] = [
+      {
+        id: 'neg:bilibili:BV_FED',
+        polarity: 'negative',
+        embedding: fedVec,
+        embedder: 'ngram',
+        text: fedTitle,
+        weight: 1.0,
+        lastHitAt: Date.now(),
+      },
+    ];
+
+    const result = await evaluateBatch(
+      [
+        makeItem({ item_id: 'BV_SIMILAR', title: '小米三季报利润少一半，到底发生了啥' }),
+        makeItem({ item_id: 'BV_UNRELATED', title: '手工木工制作一把古风折扇全过程' }),
+      ],
+      {
+        rules: createEmptyRuleSet(),
+        anchors,
+        config: DEFAULT_FILTER_CONFIG,
+        provider: ngram,
+      },
+    );
+
+    expect(result.degraded).toBe(false);
+    expect(result.decisions[0].blocked).toBe(true);
+    expect(result.decisions[0].reason).toContain('词面相似');
+    expect(result.decisions[1].blocked).toBe(false);
   });
 });

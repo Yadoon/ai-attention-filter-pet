@@ -42,6 +42,8 @@ export interface FilterDecision {
   reason?: string;
   /** ID of the negative anchor that triggered L2 blocking (used for spit down-weighting). */
   matchedAnchorId?: string;
+  /** Short title of the matched negative anchor for user-facing transparency. */
+  matchedTitle?: string;
 }
 
 export interface FilterConfig {

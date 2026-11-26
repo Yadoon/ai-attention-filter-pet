@@ -57,7 +57,10 @@ export async function evaluateBatch(
   }
 
   let degraded = false;
-  const hasNegativeAnchors = ctx.anchors.some((a) => a.polarity === 'negative');
+  const activeMode = ctx.provider?.mode ?? 'neural';
+  const hasNegativeAnchors = ctx.anchors.some(
+    (a) => a.polarity === 'negative' && (a.embedder ?? 'neural') === activeMode,
+  );
 
   if (
     pendingForL2.length > 0 &&
@@ -78,6 +81,8 @@ export async function evaluateBatch(
           embeddings[i],
           ctx.anchors,
           ctx.config,
+          Date.now(),
+          activeMode,
         );
         decisionMap.set(item.item_id, decision);
       }

@@ -127,6 +127,8 @@ export class BilibiliAdapter implements SiteAdapter {
       element.style.position = 'relative';
     }
 
+    const isAutoBlocked = decision.layer === 'L2' || decision.reason !== '你手动投喂给了宠物';
+
     // Preserve card outer box dimensions so Bilibili's grid layout never jumps.
     const mask = document.createElement('div');
     mask.className = MASK_CLASS;
@@ -142,15 +144,23 @@ export class BilibiliAdapter implements SiteAdapter {
       padding: '12px',
       textAlign: 'center',
       borderRadius: '8px',
-      background: 'rgba(20, 22, 30, 0.86)',
+      background: isAutoBlocked
+        ? 'rgba(12, 22, 38, 0.90)'
+        : 'rgba(20, 22, 30, 0.86)',
+      border: isAutoBlocked
+        ? '1.5px solid rgba(56, 189, 248, 0.65)'
+        : '1px solid rgba(148, 163, 184, 0.25)',
       backdropFilter: 'blur(10px)',
       color: '#e5e7eb',
       fontSize: '12px',
     });
 
     const label = document.createElement('div');
-    label.textContent = `🐾 宠物吃掉了一条内容`;
+    label.textContent = isAutoBlocked
+      ? '✨ 宠物自动帮你吃掉了这条内容'
+      : '🐾 已手动投喂给宠物';
     label.style.fontWeight = '600';
+    label.style.color = isAutoBlocked ? '#7dd3fc' : '#f1f5f9';
 
     const reason = document.createElement('div');
     reason.textContent = decision.reason ?? '命中过滤规则';

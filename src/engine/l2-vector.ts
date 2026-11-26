@@ -1,19 +1,25 @@
 import type { FilterConfig, FilterDecision, NormalizedItem } from '@/types/item';
 
+export type EmbedderMode = 'neural' | 'ngram';
+
 export interface AnchorVector {
   id: string;
   polarity: 'negative' | 'positive';
   embedding: Float32Array;
+  embedder?: EmbedderMode;
+  text?: string;
   weight: number;
   lastHitAt: number;
 }
 
 /**
  * Unified inference provider contract.
- * MVP uses Offscreen WebGPU/WASM; Phase 3 can swap in a local daemon without changing callers.
+ * MVP uses Offscreen WebGPU/WASM with offline N-gram fallback;
+ * Phase 3 can swap in a local daemon without changing callers.
  */
 export interface InferenceProvider {
   readonly name: string;
+  readonly mode?: EmbedderMode;
   isReady(): boolean;
   embedTexts(texts: string[]): Promise<Float32Array[]>;
 }
@@ -65,6 +71,21 @@ export function buildEmbeddingText(item: NormalizedItem): string {
 }
 
 /**
+ * Compute effective threshold for the active embedding space.
+ * N-gram lexical cosine scores are naturally sparser than neural semantic embeddings,
+ * so we map the user's slider (0.55..0.95) into an intuitive ngram threshold (0.28..0.57).
+ */
+export function getEffectiveThreshold(
+  config: FilterConfig,
+  mode: EmbedderMode = 'neural',
+): number {
+  if (mode === 'ngram') {
+    return Math.max(0.28, Number((config.l2Threshold - 0.38).toFixed(2)));
+  }
+  return config.l2Threshold;
+}
+
+/**
  * Evaluate a single normalized embedding against negative & positive anchor banks.
  * Boundary formula: boundaryScore = maxWeightedNeg - alpha * maxPos
  */
@@ -74,26 +95,39 @@ export function scoreAgainstAnchors(
   anchors: AnchorVector[],
   config: FilterConfig,
   now = Date.now(),
+  mode: EmbedderMode = 'neural',
 ): FilterDecision {
   let maxNegScore = 0;
   let matchedAnchorId: string | undefined;
+  let matchedTitle: string | undefined;
   let maxPosScore = 0;
 
   for (const anchor of anchors) {
+    // Never compare vectors from different embedding spaces.
+    const anchorMode = anchor.embedder ?? 'neural';
+    if (anchorMode !== mode) continue;
+
     const sim = dotProduct(embedding, anchor.embedding);
     if (anchor.polarity === 'negative') {
       const effective = sim * anchor.weight * computeTimeDecay(anchor.lastHitAt, now);
       if (effective > maxNegScore) {
         maxNegScore = effective;
         matchedAnchorId = anchor.id;
+        matchedTitle = anchor.text?.split(' | ')[0];
       }
     } else if (sim > maxPosScore) {
       maxPosScore = sim;
     }
   }
 
+  const threshold = getEffectiveThreshold(config, mode);
   const boundaryScore = maxNegScore - config.positiveAlpha * maxPosScore;
-  const blocked = boundaryScore > config.l2Threshold;
+  const blocked = boundaryScore > threshold;
+
+  const shortTitle = matchedTitle
+    ? `《${matchedTitle.slice(0, 16)}${matchedTitle.length > 16 ? '…' : ''}》`
+    : '历史投喂';
+  const modeLabel = mode === 'ngram' ? '词面相似' : '语义相似';
 
   return {
     item_id: itemId,
@@ -101,8 +135,9 @@ export function scoreAgainstAnchors(
     layer: 'L2',
     score: Number(boundaryScore.toFixed(4)),
     reason: blocked
-      ? `语义匹配负样本 (边界分 ${boundaryScore.toFixed(2)})`
+      ? `${modeLabel}${shortTitle} (${boundaryScore.toFixed(2)})`
       : undefined,
     matchedAnchorId: blocked ? matchedAnchorId : undefined,
+    matchedTitle: blocked ? matchedTitle : undefined,
   };
 }

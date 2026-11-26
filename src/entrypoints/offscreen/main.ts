@@ -5,53 +5,68 @@ import {
   buildEmbeddingText,
   l2Normalize,
   type AnchorVector,
+  type EmbedderMode,
   type InferenceProvider,
 } from '@/engine/l2-vector';
+import { NgramEmbeddingProvider } from '@/engine/ngram-embedder';
 import { evaluateBatch } from '@/engine/pipeline';
 import { db, todayKey } from '@/storage/db';
 import { DEFAULT_FILTER_CONFIG, type FilterConfig } from '@/types/item';
 import type { ExtensionMessage, PetStatus, RecentEatenEntry } from '@/types/messages';
 
 const MODEL_ID = 'Xenova/bge-small-zh-v1.5';
+const REMOTE_HOSTS = ['https://hf-mirror.com/', 'https://huggingface.co/'];
 const MAX_NEGATIVE_ANCHORS = 1000;
 const AUTHOR_BLOCK_SUGGEST_THRESHOLD = 3;
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
+// MV3 extension pages lack COOP/COEP headers for SharedArrayBuffer; force single-threaded WASM.
+if (env.backends?.onnx?.wasm) {
+  env.backends.onnx.wasm.numThreads = 1;
+  env.backends.onnx.wasm.proxy = false;
+}
 
 class TransformersEmbeddingProvider implements InferenceProvider {
   readonly name = MODEL_ID;
+  readonly mode: EmbedderMode = 'neural';
   private extractor: FeatureExtractionPipeline | null = null;
-  private loadingPromise: Promise<void> | null = null;
-  public backend: 'webgpu' | 'wasm' | 'rules-only' = 'rules-only';
+  private loadingPromise: Promise<boolean> | null = null;
+  public loading = false;
+  public backend: 'webgpu' | 'wasm' | null = null;
 
   isReady(): boolean {
     return this.extractor !== null;
   }
 
-  async init(): Promise<void> {
-    if (this.extractor) return;
+  async init(): Promise<boolean> {
+    if (this.extractor) return true;
     if (this.loadingPromise) return this.loadingPromise;
 
+    this.loading = true;
     this.loadingPromise = (async () => {
       const hasWebGpu = typeof navigator !== 'undefined' && 'gpu' in navigator;
       const devices: Array<'webgpu' | 'wasm'> = hasWebGpu ? ['webgpu', 'wasm'] : ['wasm'];
 
-      for (const device of devices) {
-        try {
-          const loaded = await pipeline('feature-extraction', MODEL_ID, {
-            device,
-            dtype: 'q8',
-          });
-          this.extractor = loaded as unknown as FeatureExtractionPipeline;
-          this.backend = device;
-          return;
-        } catch {
-          // Try next available backend.
+      for (const host of REMOTE_HOSTS) {
+        env.remoteHost = host;
+        for (const device of devices) {
+          try {
+            const loaded = await pipeline('feature-extraction', MODEL_ID, {
+              device,
+              dtype: 'q8',
+            });
+            this.extractor = loaded as unknown as FeatureExtractionPipeline;
+            this.backend = device;
+            return true;
+          } catch {
+            // Try next device or mirror host.
+          }
         }
       }
-      this.backend = 'rules-only';
+      return false;
     })().finally(() => {
+      this.loading = false;
       this.loadingPromise = null;
     });
 
@@ -71,7 +86,13 @@ class TransformersEmbeddingProvider implements InferenceProvider {
   }
 }
 
-const provider = new TransformersEmbeddingProvider();
+const neuralProvider = new TransformersEmbeddingProvider();
+const ngramProvider = new NgramEmbeddingProvider();
+
+function getActiveProvider(): InferenceProvider {
+  return neuralProvider.isReady() ? neuralProvider : ngramProvider;
+}
+
 let config: FilterConfig = { ...DEFAULT_FILTER_CONFIG };
 let cachedRules: L1RuleSet = createEmptyRuleSet();
 let cachedAnchors: AnchorVector[] = [];
@@ -112,9 +133,34 @@ async function loadStateFromDb(): Promise<void> {
     id: v.id,
     polarity: v.polarity,
     embedding: new Float32Array(v.embedding),
+    embedder: v.embedder ?? 'neural',
+    text: v.text,
     weight: v.weight,
     lastHitAt: v.lastHitAt,
   }));
+}
+
+/**
+ * Once bge-small-zh finishes loading, upgrade any offline ngram vectors to neural embeddings.
+ */
+async function upgradeNgramVectorsToNeural(): Promise<void> {
+  if (!neuralProvider.isReady()) return;
+  const all = await db.vectors.toArray();
+  const pending = all.filter((v) => v.embedder === 'ngram');
+  if (pending.length === 0) return;
+
+  try {
+    const embeddings = await neuralProvider.embedTexts(pending.map((v) => v.text));
+    for (let i = 0; i < pending.length; i++) {
+      await db.vectors.update(pending[i].id, {
+        embedding: Array.from(embeddings[i]),
+        embedder: 'neural',
+      });
+    }
+    await loadStateFromDb();
+  } catch {
+    // Keep existing ngram vectors if upgrade fails.
+  }
 }
 
 async function incrementDailyStat(field: 'eatenCount' | 'spitCount', delta = 1): Promise<void> {
@@ -141,11 +187,12 @@ async function pruneNegativeBankIfNeeded(): Promise<void> {
 async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
   switch (msg.type) {
     case 'EVALUATE_BATCH': {
+      const activeProvider = getActiveProvider();
       const result = await evaluateBatch(msg.items, {
         rules: cachedRules,
         anchors: cachedAnchors,
         config,
-        provider,
+        provider: activeProvider,
       });
       const itemMap = new Map(msg.items.map((item) => [item.item_id, item]));
       let eatenNow = 0;
@@ -200,25 +247,26 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
         }
       }
 
-      if (provider.isReady()) {
-        try {
-          const text = buildEmbeddingText(item);
-          const [embedding] = await provider.embedTexts([text]);
-          await db.vectors.put({
-            id: `neg:${item.platform}:${item.item_id}`,
-            polarity: 'negative',
-            platform: item.platform,
-            itemId: item.item_id,
-            text,
-            embedding: Array.from(embedding),
-            weight: 1.0,
-            createdAt: now,
-            lastHitAt: now,
-          });
-          await pruneNegativeBankIfNeeded();
-        } catch {
-          // Keep rule updates even if embedding fails.
-        }
+      // Always embed using active provider (neural when ready, offline ngram otherwise).
+      const activeProvider = getActiveProvider();
+      try {
+        const text = buildEmbeddingText(item);
+        const [embedding] = await activeProvider.embedTexts([text]);
+        await db.vectors.put({
+          id: `neg:${item.platform}:${item.item_id}`,
+          polarity: 'negative',
+          platform: item.platform,
+          itemId: item.item_id,
+          text,
+          embedding: Array.from(embedding),
+          embedder: activeProvider.mode ?? 'neural',
+          weight: 1.0,
+          createdAt: now,
+          lastHitAt: now,
+        });
+        await pruneNegativeBankIfNeeded();
+      } catch {
+        // Keep rule updates even if embedding fails.
       }
 
       recordRecentEaten(item.item_id, item.title, '手动投喂');
@@ -237,7 +285,6 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
       const { item, matchedAnchorId } = msg;
       const now = Date.now();
 
-      // Down-weight the specific historical negative anchor that caused the false positive.
       if (matchedAnchorId) {
         const existingNeg = await db.vectors.get(matchedAnchorId);
         if (existingNeg) {
@@ -247,25 +294,24 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
         }
       }
 
-      // Add a positive anchor so similar high-quality content is repelled from the block boundary.
-      if (provider.isReady()) {
-        try {
-          const text = buildEmbeddingText(item);
-          const [embedding] = await provider.embedTexts([text]);
-          await db.vectors.put({
-            id: `pos:${item.platform}:${item.item_id}`,
-            polarity: 'positive',
-            platform: item.platform,
-            itemId: item.item_id,
-            text,
-            embedding: Array.from(embedding),
-            weight: 1.0,
-            createdAt: now,
-            lastHitAt: now,
-          });
-        } catch {
-          // Non-fatal.
-        }
+      const activeProvider = getActiveProvider();
+      try {
+        const text = buildEmbeddingText(item);
+        const [embedding] = await activeProvider.embedTexts([text]);
+        await db.vectors.put({
+          id: `pos:${item.platform}:${item.item_id}`,
+          polarity: 'positive',
+          platform: item.platform,
+          itemId: item.item_id,
+          text,
+          embedding: Array.from(embedding),
+          embedder: activeProvider.mode ?? 'neural',
+          weight: 1.0,
+          createdAt: now,
+          lastHitAt: now,
+        });
+      } catch {
+        // Non-fatal.
       }
 
       await incrementDailyStat('spitCount', 1);
@@ -301,8 +347,9 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
         ...recentEaten.map((e) => e.title),
       ];
       const status: PetStatus = {
-        modelReady: provider.isReady(),
-        backend: provider.backend,
+        modelReady: neuralProvider.isReady(),
+        modelLoading: neuralProvider.loading,
+        backend: neuralProvider.backend ?? 'ngram',
         todayEaten: stat?.eatenCount ?? 0,
         negativeCount: cachedAnchors.filter((a) => a.polarity === 'negative').length,
         positiveCount: cachedAnchors.filter((a) => a.polarity === 'positive').length,
@@ -318,7 +365,10 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
 
 void (async () => {
   await loadStateFromDb();
-  void provider.init();
+  const ok = await neuralProvider.init();
+  if (ok) {
+    await upgradeNgramVectorsToNeural();
+  }
 })();
 
 browser.runtime.onMessage.addListener((rawMessage, _sender, sendResponse) => {

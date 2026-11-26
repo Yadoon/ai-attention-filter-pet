@@ -455,7 +455,7 @@ export class FloatingPetController {
     if (this.statNegEl) this.statNegEl.textContent = String(status.negativeCount);
     if (this.statPosEl) this.statPosEl.textContent = String(status.positiveCount);
 
-    this.setDegraded(!status.modelReady, status.backend);
+    this.setDegraded(!status.modelReady, status.backend, status.modelLoading);
 
     if (this.thresholdInput && this.thresholdValEl) {
       this.thresholdInput.value = String(status.config.l2Threshold);
@@ -506,16 +506,24 @@ export class FloatingPetController {
     }
   }
 
-  setDegraded(degraded: boolean, backend?: PetStatus['backend']): void {
+  setDegraded(
+    degraded: boolean,
+    backend?: PetStatus['backend'],
+    modelLoading?: boolean,
+  ): void {
     this.dotEl?.classList.toggle('degraded', degraded);
     if (!this.badgeEl) return;
     this.badgeEl.classList.toggle('degraded', degraded);
     if (backend === 'webgpu') {
-      this.badgeEl.textContent = 'WebGPU 本地加速';
+      this.badgeEl.textContent = 'WebGPU 语义加速';
     } else if (backend === 'wasm') {
-      this.badgeEl.textContent = 'WASM 本地运行';
+      this.badgeEl.textContent = 'WASM 语义加速';
+    } else if (backend === 'ngram') {
+      this.badgeEl.textContent = modelLoading
+        ? '词面向量（模型下载中…）'
+        : '词面向量模式（离线可用）';
     } else {
-      this.badgeEl.textContent = degraded ? '轻装规则模式' : '本地引擎就绪';
+      this.badgeEl.textContent = degraded ? '词面向量兜底' : '本地引擎就绪';
     }
   }
 

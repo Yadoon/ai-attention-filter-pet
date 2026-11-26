@@ -22,7 +22,8 @@ export interface RecentEatenEntry {
 
 export interface PetStatus {
   modelReady: boolean;
-  backend: 'webgpu' | 'wasm' | 'rules-only';
+  modelLoading: boolean;
+  backend: 'webgpu' | 'wasm' | 'ngram';
   todayEaten: number;
   negativeCount: number;
   positiveCount: number;
