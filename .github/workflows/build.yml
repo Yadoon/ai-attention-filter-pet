@@ -48,6 +48,8 @@ jobs:
         with:
           name: attention-filter-pet-chrome-mv3
           path: .output/*.zip
+          include-hidden-files: true
+          if-no-files-found: error
           retention-days: 30
 
       - name: Create GitHub Release on tag push
