@@ -21,8 +21,10 @@ const AUTHOR_BLOCK_SUGGEST_THRESHOLD = 3;
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
-// MV3 extension pages lack COOP/COEP headers for SharedArrayBuffer; force single-threaded WASM.
+// MV3 extension pages cannot load scripts from CDN or use SharedArrayBuffer;
+// serve ONNX Runtime Web assets locally from chrome-extension://<id>/ort/ in single-threaded mode.
 if (env.backends?.onnx?.wasm) {
+  env.backends.onnx.wasm.wasmPaths = new URL('/ort/', browser.runtime.getURL('/')).href;
   env.backends.onnx.wasm.numThreads = 1;
   env.backends.onnx.wasm.proxy = false;
 }

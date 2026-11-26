@@ -5,15 +5,16 @@
   "type": "module",
   "description": "Cross-platform local AI attention filter & companion pet browser extension",
   "scripts": {
-    "dev": "wxt",
-    "dev:firefox": "wxt -b firefox",
-    "build": "wxt build",
-    "build:firefox": "wxt build -b firefox",
-    "zip": "wxt zip",
+    "copy:ort": "node scripts/copy-ort.mjs",
+    "dev": "pnpm copy:ort && wxt",
+    "dev:firefox": "pnpm copy:ort && wxt -b firefox",
+    "build": "pnpm copy:ort && wxt build",
+    "build:firefox": "pnpm copy:ort && wxt build -b firefox",
+    "zip": "pnpm copy:ort && wxt zip",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "postinstall": "wxt prepare"
+    "postinstall": "node scripts/copy-ort.mjs && wxt prepare"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.5.0",
