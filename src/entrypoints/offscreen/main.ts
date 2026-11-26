@@ -109,15 +109,32 @@ function recordRecentEaten(itemId: string, title: string, reason: string): void 
   }
 }
 
+function readConfigFromStorage(): Partial<FilterConfig> | null {
+  try {
+    const raw = window.localStorage.getItem('afp_config');
+    return raw ? (JSON.parse(raw) as Partial<FilterConfig>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeConfigToStorage(next: FilterConfig): void {
+  try {
+    window.localStorage.setItem('afp_config', JSON.stringify(next));
+  } catch {
+    // Non-fatal.
+  }
+}
+
 async function loadStateFromDb(): Promise<void> {
-  const [rules, vectors, storedCfg] = await Promise.all([
+  const [rules, vectors] = await Promise.all([
     db.rules.toArray(),
     db.vectors.toArray(),
-    browser.storage.local.get('afp_config'),
   ]);
 
-  if (storedCfg?.afp_config) {
-    config = { ...DEFAULT_FILTER_CONFIG, ...(storedCfg.afp_config as Partial<FilterConfig>) };
+  const storedCfg = readConfigFromStorage();
+  if (storedCfg) {
+    config = { ...DEFAULT_FILTER_CONFIG, ...storedCfg };
   }
 
   const nextRules = createEmptyRuleSet();
@@ -333,7 +350,7 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
 
     case 'UPDATE_CONFIG': {
       config = { ...config, ...msg.patch };
-      await browser.storage.local.set({ afp_config: config });
+      writeConfigToStorage(config);
       return { ok: true, config };
     }
 
