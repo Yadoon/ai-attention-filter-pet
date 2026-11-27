@@ -8,7 +8,7 @@ export default defineConfig({
     plugins: [tailwindcss()],
   }),
   manifest: {
-    name: 'Attention Filter Pet',
+    name: 'AT Pet',
     description: '本地 AI 注意力过滤与伴生数字宠物（B 站 / 小红书 / 抖音网页版）',
     permissions: ['storage', 'offscreen'],
     host_permissions: [

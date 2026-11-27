@@ -1,5 +1,8 @@
 import { fetchSponsorSegments } from '@/engine/sponsorblock';
 import {
+  MAX_BGM_CHUNKS,
+  MAX_VECTOR_CHUNKS,
+  SYNC_BGM_CHUNK_PREFIX,
   SYNC_CHUNK_PREFIX,
   SYNC_META_KEY,
   getAllSyncKeys,
@@ -26,6 +29,8 @@ const MUTATING_TYPES = new Set([
   'ADD_RULE',
   'REMOVE_RULE',
   'REMOVE_VECTOR',
+  'ADD_BGM_FINGERPRINT',
+  'REMOVE_BGM_FINGERPRINT',
   'IMPORT_DATA',
 ]);
 
@@ -52,51 +57,60 @@ async function ensureOffscreenDocument(): Promise<void> {
   await creatingOffscreen;
 }
 
-async function pullFromChromeSync(): Promise<number> {
-  if (!browser.storage?.sync) return 0;
+async function pullFromChromeSync(): Promise<{ pulledVectors: number; pulledBgm: number }> {
+  if (!browser.storage?.sync) return { pulledVectors: 0, pulledBgm: 0 };
   try {
     const raw = (await browser.storage.sync.get(getAllSyncKeys())) as Record<string, unknown>;
     const snapshot = unpackSyncSnapshot(raw);
-    if (!snapshot) return 0;
+    if (!snapshot) return { pulledVectors: 0, pulledBgm: 0 };
     await ensureOffscreenDocument();
     const res = (await browser.runtime.sendMessage({
       type: 'APPLY_SYNC_SNAPSHOT',
       snapshot,
       target: 'offscreen',
-    })) as { ok?: boolean; pulledVectors?: number } | undefined;
-    return res?.pulledVectors ?? 0;
+    })) as { ok?: boolean; pulledVectors?: number; pulledBgm?: number } | undefined;
+    return {
+      pulledVectors: res?.pulledVectors ?? 0,
+      pulledBgm: res?.pulledBgm ?? 0,
+    };
   } catch (err) {
     console.warn('[AFP] Failed to pull from chrome.storage.sync:', err);
-    return 0;
+    return { pulledVectors: 0, pulledBgm: 0 };
   }
 }
 
-async function pushToChromeSync(): Promise<number> {
-  if (!browser.storage?.sync) return 0;
+async function pushToChromeSync(): Promise<{ syncedVectors: number; syncedBgm: number }> {
+  if (!browser.storage?.sync) return { syncedVectors: 0, syncedBgm: 0 };
   try {
     await ensureOffscreenDocument();
     const res = (await browser.runtime.sendMessage({
       type: 'GET_SYNC_SNAPSHOT',
       target: 'offscreen',
     })) as { ok?: boolean; snapshot?: SyncSnapshot } | undefined;
-    if (!res?.ok || !res.snapshot) return 0;
+    if (!res?.ok || !res.snapshot) return { syncedVectors: 0, syncedBgm: 0 };
 
-    const { items, chunkCount } = packSyncSnapshot(res.snapshot);
+    const { items, chunkCount, bgmChunkCount } = packSyncSnapshot(res.snapshot);
     lastPushedAt = res.snapshot.updatedAt;
     await browser.storage.sync.set(items);
 
     // Clean up any stale chunks from previous larger snapshots.
     const staleKeys: string[] = [];
-    for (let i = chunkCount; i < 10; i++) {
+    for (let i = chunkCount; i < MAX_VECTOR_CHUNKS; i++) {
       staleKeys.push(`${SYNC_CHUNK_PREFIX}${i}`);
+    }
+    for (let i = bgmChunkCount; i < MAX_BGM_CHUNKS; i++) {
+      staleKeys.push(`${SYNC_BGM_CHUNK_PREFIX}${i}`);
     }
     if (staleKeys.length > 0) {
       await browser.storage.sync.remove(staleKeys);
     }
-    return res.snapshot.vectors.length;
+    return {
+      syncedVectors: res.snapshot.vectors.length,
+      syncedBgm: res.snapshot.bgmFingerprints?.length ?? 0,
+    };
   } catch (err) {
     console.warn('[AFP] Failed to push to chrome.storage.sync:', err);
-    return 0;
+    return { syncedVectors: 0, syncedBgm: 0 };
   }
 }
 
@@ -144,15 +158,23 @@ export default defineBackground(() => {
     if (message?.type === 'SYNC_NOW') {
       (async () => {
         try {
-          const pulledVectors = await pullFromChromeSync();
-          const syncedVectors = await pushToChromeSync();
-          const res: SyncNowResponse = { ok: true, syncedVectors, pulledVectors };
+          const { pulledVectors, pulledBgm } = await pullFromChromeSync();
+          const { syncedVectors, syncedBgm } = await pushToChromeSync();
+          const res: SyncNowResponse = {
+            ok: true,
+            syncedVectors,
+            pulledVectors,
+            syncedBgm,
+            pulledBgm,
+          };
           sendResponse(res);
         } catch (err) {
           const res: SyncNowResponse = {
             ok: false,
             syncedVectors: 0,
             pulledVectors: 0,
+            syncedBgm: 0,
+            pulledBgm: 0,
             error: err instanceof Error ? err.message : '云同步失败',
           };
           sendResponse(res);

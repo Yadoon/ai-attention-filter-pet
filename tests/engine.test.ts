@@ -107,6 +107,40 @@ describe('Pipeline Fail-Open degradation', () => {
     expect(result.decisions[0].blocked).toBe(false);
     expect(result.decisions[0].layer).toBe('FAIL_OPEN');
   });
+
+  it('always exempts exact itemId already in positive anchor bank even if embedding drifts below positiveMinSim', () => {
+    const anchors: AnchorVector[] = [
+      {
+        id: 'neg:1',
+        polarity: 'negative',
+        embedding: l2Normalize(new Float32Array([0.9, 0.4, 0])),
+        weight: 1.0,
+        lastHitAt: Date.now(),
+      },
+      {
+        id: 'pos:bilibili:BV1CKWXzaEX4',
+        itemId: 'BV1CKWXzaEX4',
+        polarity: 'positive',
+        text: '【恬豆】牢豆释放极致的压抑 | 直播切片',
+        embedding: l2Normalize(new Float32Array([0.4, 0.9, 0.2])),
+        weight: 1.0,
+        lastHitAt: Date.now(),
+      },
+    ];
+
+    const decision = scoreAgainstAnchors(
+      'BV1CKWXzaEX4',
+      l2Normalize(new Float32Array([0.88, 0.45, 0])),
+      anchors,
+      { ...DEFAULT_FILTER_CONFIG, l2Threshold: 0.78, positiveMinSim: 0.82 },
+      Date.now(),
+      'neural',
+      { bypass: false, delta: 0.04, notes: ['极低弹幕(+0.04)'] },
+      '【恬豆】牢豆释放极致的压抑',
+    );
+    expect(decision.blocked).toBe(false);
+    expect(decision.reason).toBe('白库精确放行');
+  });
 });
 
 import { NgramEmbeddingProvider } from '@/engine/ngram-embedder';
@@ -165,7 +199,12 @@ describe('Offline N-gram vector fallback', () => {
   });
 });
 
-import { packSyncSnapshot, unpackSyncSnapshot } from '@/storage/sync-codec';
+import {
+  decodeQuantizedEmbedding,
+  encodeQuantizedEmbedding,
+  packSyncSnapshot,
+  unpackSyncSnapshot,
+} from '@/storage/sync-codec';
 
 describe('Chrome storage.sync chunk codec', () => {
   it('splits large vector banks into <8KB chunks and round-trips losslessly', () => {
@@ -199,6 +238,49 @@ describe('Chrome storage.sync chunk codec', () => {
     expect(restored!.vectors.length).toBe(120);
     expect(restored!.rules).toEqual([{ k: 'keyword', v: '保姆级' }]);
     expect(restored!.config.l2Threshold).toBe(0.72);
+  });
+
+  it('packs and unpacks quantized 512-dim CLAP & 64-dim DSP BGM fingerprints with >0.999 cosine fidelity', () => {
+    const rawClap = Array.from({ length: 512 }, (_, i) => Math.sin(i * 0.37) * Math.cos(i * 0.13));
+    const norm = Math.sqrt(rawClap.reduce((s, v) => s + v * v, 0));
+    const clapVec = rawClap.map((v) => v / norm);
+
+    const encoded = encodeQuantizedEmbedding(clapVec);
+    const { items, bgmChunkCount } = packSyncSnapshot({
+      version: 1,
+      updatedAt: 1795700000000,
+      config: {},
+      rules: [],
+      vectors: [],
+      bgmFingerprints: [
+        {
+          id: 'bgm:clap1',
+          l: '压抑到极致的瞬间燃爆',
+          s: 'b',
+          m: 'c',
+          e: encoded.e,
+          a: encoded.a,
+          c: 1795700000000,
+        },
+      ],
+    });
+
+    expect(bgmChunkCount).toBe(1);
+    for (const val of Object.values(items)) {
+      const size = new TextEncoder().encode(JSON.stringify(val)).length;
+      expect(size).toBeLessThan(8192);
+    }
+
+    const restored = unpackSyncSnapshot(items);
+    expect(restored?.bgmFingerprints?.length).toBe(1);
+    const decoded = decodeQuantizedEmbedding(
+      restored!.bgmFingerprints![0].e,
+      restored!.bgmFingerprints![0].a,
+    );
+    expect(decoded.length).toBe(512);
+    let dot = 0;
+    for (let i = 0; i < 512; i++) dot += clapVec[i] * decoded[i];
+    expect(dot).toBeGreaterThan(0.999);
   });
 });
 

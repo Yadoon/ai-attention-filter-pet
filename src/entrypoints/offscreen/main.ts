@@ -22,7 +22,11 @@ import {
 import { NgramEmbeddingProvider } from '@/engine/ngram-embedder';
 import { evaluateBatch } from '@/engine/pipeline';
 import { db, todayKey } from '@/storage/db';
-import type { SyncSnapshot } from '@/storage/sync-codec';
+import {
+  decodeQuantizedEmbedding,
+  encodeQuantizedEmbedding,
+  type SyncSnapshot,
+} from '@/storage/sync-codec';
 import { DEFAULT_FILTER_CONFIG, type FilterConfig } from '@/types/item';
 import type {
   ExportDataResponse,
@@ -267,6 +271,7 @@ async function loadStateFromDb(): Promise<void> {
 
   cachedAnchors = vectors.map((v) => ({
     id: v.id,
+    itemId: v.itemId,
     polarity: v.polarity,
     embedding: new Float32Array(v.embedding),
     embedder: v.embedder ?? 'neural',
@@ -578,7 +583,7 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
         return empty;
       }
 
-      // 1. Prefer 512-dim CLAP semantic audio matching when ready & PCM provided.
+      // 1. When CLAP is ready and CLAP anchors exist, use CLAP authoritatively (do not fall back to legacy DSP chips).
       const hasClapAnchors = cachedBgmAnchors.some((a) => a.embedder === 'clap');
       if (
         hasClapAnchors &&
@@ -594,17 +599,15 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
             DEFAULT_CLAP_MATCH_THRESHOLD,
             'clap',
           );
-          if (clapRes.matched) {
-            const reply: MatchBgmResponse = {
-              ok: true,
-              matched: true,
-              score: clapRes.score,
-              label: clapRes.anchor?.label,
-              severity: clapRes.anchor?.severity,
-              id: clapRes.anchor?.id,
-            };
-            return reply;
-          }
+          const reply: MatchBgmResponse = {
+            ok: true,
+            matched: clapRes.matched,
+            score: clapRes.score,
+            label: clapRes.anchor?.label,
+            severity: clapRes.anchor?.severity,
+            id: clapRes.anchor?.id,
+          };
+          return reply;
         } catch (err) {
           console.warn('[AFP] CLAP match failed, falling back to DSP:', err);
         }
@@ -670,10 +673,11 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
     }
 
     case 'EXPORT_DATA': {
-      const [vectors, rules, stats] = await Promise.all([
+      const [vectors, rules, stats, bgmFingerprints] = await Promise.all([
         db.vectors.toArray(),
         db.rules.toArray(),
         db.stats.toArray(),
+        db.bgmFingerprints.toArray(),
       ]);
       const data: PetDataBackup = {
         schemaVersion: 1,
@@ -682,6 +686,7 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
         vectors,
         rules,
         stats,
+        bgmFingerprints,
       };
       const res: ExportDataResponse = { ok: true, data };
       return res;
@@ -694,6 +699,7 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
           ok: false,
           importedVectors: 0,
           importedRules: 0,
+          importedBgm: 0,
           error: '备份文件格式不正确（缺少 vectors 数组）',
         };
         return res;
@@ -717,13 +723,32 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
       const validStats = Array.isArray(payload.stats)
         ? payload.stats.filter((s) => s && typeof s.date === 'string')
         : [];
+      const validBgm = Array.isArray(payload.bgmFingerprints)
+        ? payload.bgmFingerprints.filter(
+            (b) =>
+              b &&
+              typeof b.id === 'string' &&
+              typeof b.label === 'string' &&
+              Array.isArray(b.embedding) &&
+              b.embedding.length > 0,
+          )
+        : [];
 
       if (mode === 'replace') {
-        await Promise.all([db.vectors.clear(), db.rules.clear(), db.stats.clear()]);
+        await Promise.all([
+          db.vectors.clear(),
+          db.rules.clear(),
+          db.stats.clear(),
+          db.bgmFingerprints.clear(),
+        ]);
       }
 
       if (validVectors.length > 0) {
         await db.vectors.bulkPut(validVectors);
+      }
+
+      if (validBgm.length > 0) {
+        await db.bgmFingerprints.bulkPut(validBgm);
       }
 
       let importedRules = 0;
@@ -766,14 +791,16 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
         ok: true,
         importedVectors: validVectors.length,
         importedRules,
+        importedBgm: validBgm.length,
       };
       return res;
     }
 
     case 'GET_SYNC_SNAPSHOT': {
-      const [vectors, rules] = await Promise.all([
+      const [vectors, rules, bgmFingerprints] = await Promise.all([
         db.vectors.toArray(),
         db.rules.toArray(),
+        db.bgmFingerprints.toArray(),
       ]);
       const snapshot: SyncSnapshot = {
         version: 1,
@@ -795,20 +822,36 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
           c: v.createdAt,
           l: v.lastHitAt,
         })),
+        bgmFingerprints: bgmFingerprints
+          .filter((b) => Array.isArray(b.embedding) && b.embedding.length > 0)
+          .map((b) => {
+            const { e, a } = encodeQuantizedEmbedding(b.embedding);
+            return {
+              id: b.id,
+              l: b.label.slice(0, 40),
+              s: b.severity === 'penalty' ? 'p' : 'b',
+              m: b.embedder === 'clap' ? 'c' : 'd',
+              e,
+              a,
+              c: b.createdAt,
+            };
+          }),
       };
       return { ok: true, snapshot };
     }
 
     case 'APPLY_SYNC_SNAPSHOT': {
       const snap = msg.snapshot;
-      if (!snap || snap.version !== 1) return { ok: false, pulledVectors: 0 };
+      if (!snap || snap.version !== 1) return { ok: false, pulledVectors: 0, pulledBgm: 0 };
 
-      const [existingVectors, existingRules] = await Promise.all([
+      const [existingVectors, existingRules, existingBgm] = await Promise.all([
         db.vectors.toArray(),
         db.rules.toArray(),
+        db.bgmFingerprints.toArray(),
       ]);
       const existingVecIds = new Set(existingVectors.map((v) => v.id));
       const existingRuleKeys = new Set(existingRules.map((r) => `${r.kind}:${r.value}`));
+      const existingBgmIds = new Set(existingBgm.map((b) => b.id));
 
       // Merge remote rules.
       const now = Date.now();
@@ -820,6 +863,31 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
             hitCount: 0,
             createdAt: now,
           });
+        }
+      }
+
+      // Merge remote BGM fingerprints.
+      let pulledBgm = 0;
+      if (Array.isArray(snap.bgmFingerprints)) {
+        for (const b of snap.bgmFingerprints) {
+          if (!existingBgmIds.has(b.id) && typeof b.e === 'string' && b.e.length > 0) {
+            try {
+              const embedding = decodeQuantizedEmbedding(b.e, b.a);
+              if (embedding.length > 0) {
+                await db.bgmFingerprints.put({
+                  id: b.id,
+                  label: b.l || '罐头 BGM',
+                  severity: b.s === 'p' ? 'penalty' : 'block',
+                  embedder: b.m === 'c' ? 'clap' : 'dsp',
+                  embedding,
+                  createdAt: b.c || now,
+                });
+                pulledBgm += 1;
+              }
+            } catch {
+              // Skip malformed quantized entry.
+            }
+          }
         }
       }
 
@@ -866,7 +934,7 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
       if (neuralProvider.isReady()) {
         void upgradeNgramVectorsToNeural();
       }
-      return { ok: true, pulledVectors };
+      return { ok: true, pulledVectors, pulledBgm };
     }
   }
 }

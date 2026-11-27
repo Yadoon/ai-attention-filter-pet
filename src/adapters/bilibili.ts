@@ -52,7 +52,7 @@ function extractItemFromDom(el: HTMLElement, apiCache: Map<string, NormalizedIte
   const titleEl =
     el.querySelector<HTMLElement>('.bili-video-card__info--tit') ??
     el.querySelector<HTMLElement>('.title') ??
-    link;
+    el.querySelector<HTMLElement>('h3[title], a[title][href*="/video/BV"]');
   const authorEl =
     el.querySelector<HTMLElement>('.bili-video-card__info--author') ??
     el.querySelector<HTMLElement>('.upname');
@@ -78,7 +78,13 @@ function extractItemFromDom(el: HTMLElement, apiCache: Map<string, NormalizedIte
       '[class*="rocket"], [class*="promote"], .bili-video-card__stats--ad, a[href*="cm.bilibili.com"], a[href*="ad_extra="]',
     ) !== null;
 
-  const title = titleEl?.textContent?.trim() ?? '';
+  const rawTitle =
+    titleEl?.getAttribute('title')?.trim() ||
+    titleEl?.textContent?.trim() ||
+    imgEl?.getAttribute('alt')?.trim() ||
+    '';
+  // Guard against cover-stats text (e.g. "2048200:18" or "5.1万48104:02") leaking as title.
+  const title = /^[\d.,万亿:\s]+$/.test(rawTitle) ? '' : rawTitle;
   if (!title) return null;
 
   return {

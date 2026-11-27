@@ -168,7 +168,7 @@ export default function App() {
             }}
           />
           <div>
-            <h1 className="text-sm font-semibold">Attention Filter Pet</h1>
+            <h1 className="text-sm font-semibold">AT Pet</h1>
             <p className="text-xs text-slate-400">当前形象：{activeSkin.name}</p>
           </div>
         </div>

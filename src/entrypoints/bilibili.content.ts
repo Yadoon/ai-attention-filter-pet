@@ -469,20 +469,31 @@ export default defineContentScript({
         if (!sample) return;
 
         // Hard trigger #1: L1 physical style (heavy EDM bass beat or repetitive meme loop).
+        const diagBase = `[${bvid}] 鼓点:${sample.style.bassBeatScore.toFixed(2)} 循环:${sample.style.loopScore.toFixed(2)}${sample.style.isLikelySpeechOnly ? ' (人声)' : ''}`;
         if (enableAudioStyleGuard && sample.style.hardDisgust) {
+          const reason = `触发L1:${sample.style.flags.join('+')}`;
+          console.info('[AFP Audio]', diagBase, reason);
+          pet.setAudioDiagnostic(`最近听歌 ${diagBase} → ${reason}`, true);
           pet.triggerBgmDisgust();
           return;
         }
 
         // Hard / soft trigger #2: user's saved BGM fingerprint bank (CLAP 512-dim or DSP 64-dim).
+        let matchInfo = '';
         if (savedBgmCount > 0) {
           const match = await sendMessage<MatchBgmResponse>({
             type: 'MATCH_BGM_FINGERPRINT',
             embedding: Array.from(sample.fingerprint),
             pcmInt16: sample.pcmInt16,
           });
+          if (match?.ok) {
+            matchInfo = ` 指纹:${match.score.toFixed(2)}${match.label ? `(${match.label})` : ''}`;
+          }
           if (match?.ok && match.matched) {
             if (match.severity !== 'penalty') {
+              const reason = `命中黑名单「${match.label ?? 'BGM'}」(${match.score.toFixed(2)})`;
+              console.info('[AFP Audio]', diagBase, reason);
+              pet.setAudioDiagnostic(`最近听歌 ${diagBase} → ${reason}`, true);
               pet.triggerBgmDisgust();
               return;
             }
@@ -493,6 +504,9 @@ export default defineContentScript({
               sample.style.bassBeatScore >= 0.45 ||
               sample.style.loopScore >= 0.65
             ) {
+              const reason = `命中降权BGM「${match.label ?? 'BGM'}」(${match.score.toFixed(2)})`;
+              console.info('[AFP Audio]', diagBase, reason);
+              pet.setAudioDiagnostic(`最近听歌 ${diagBase} → ${reason}`, true);
               pet.triggerBgmDisgust();
               return;
             }
@@ -504,8 +518,15 @@ export default defineContentScript({
           overusedBgmHit &&
           (isClickbaitTitle(pageTitle) || sample.style.bassBeatScore >= 0.45)
         ) {
+          const reason = `命中内置滥用歌名「${overusedBgmHit}」`;
+          console.info('[AFP Audio]', diagBase, reason);
+          pet.setAudioDiagnostic(`最近听歌 ${diagBase} → ${reason}`, true);
           pet.triggerBgmDisgust();
+          return;
         }
+
+        console.info('[AFP Audio]', diagBase + matchInfo, '→ 正常');
+        pet.setAudioDiagnostic(`最近听歌 ${diagBase}${matchInfo} → 正常`, false);
       };
 
       if (!video.paused) {
@@ -627,17 +648,23 @@ export default defineContentScript({
         if (controller.signal.aborted) return;
 
         let disgusted = false;
+        let hoverReason = '正常';
 
         // 1. SponsorBlock full-video promo check.
         if (sponsorRes?.ok && sponsorRes.segments.some((s) => s.actionType === 'full')) {
           disgusted = true;
+          hoverReason = 'SponsorBlock 整期恰饭';
         }
 
         // 2. Audio L1 physical style & BGM fingerprint (CLAP or DSP).
         const sample = audioRes.sample;
+        const diagBase = sample
+          ? `[悬停 ${bvid}] 鼓点:${sample.style.bassBeatScore.toFixed(2)} 循环:${sample.style.loopScore.toFixed(2)}`
+          : `[悬停 ${bvid}] 未获取到音频`;
         if (!disgusted && sample) {
           if (enableAudioStyleGuard && sample.style.hardDisgust) {
             disgusted = true;
+            hoverReason = `触发L1:${sample.style.flags.join('+')}`;
           } else if (savedBgmCount > 0) {
             const match = await sendMessage<MatchBgmResponse>({
               type: 'MATCH_BGM_FINGERPRINT',
@@ -652,10 +679,14 @@ export default defineContentScript({
                 sample.style.loopScore >= 0.65
               ) {
                 disgusted = true;
+                hoverReason = `命中指纹「${match.label ?? 'BGM'}」(${match.score.toFixed(2)})`;
               }
             }
           }
         }
+
+        console.info('[AFP Audio Hover]', diagBase, '→', hoverReason);
+        pet.setAudioDiagnostic(`${diagBase} → ${hoverReason}`, disgusted);
 
         hoverCache.set(bvid, disgusted ? 'disgust' : 'clean');
         if (disgusted) {

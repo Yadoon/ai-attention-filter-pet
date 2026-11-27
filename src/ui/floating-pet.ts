@@ -734,6 +734,7 @@ export class FloatingPetController {
   private posListEl: HTMLDivElement | null = null;
   private bgmListEl: HTMLDivElement | null = null;
   private bgmMsgEl: HTMLDivElement | null = null;
+  private audioDiagEl: HTMLDivElement | null = null;
   private bgmCaptureBtn: HTMLButtonElement | null = null;
   private bgmPenaltyBtn: HTMLButtonElement | null = null;
   private ruleInputEl: HTMLInputElement | null = null;
@@ -780,9 +781,9 @@ export class FloatingPetController {
     const wrap = document.createElement('div');
     wrap.className = 'wrap';
     wrap.innerHTML = `
-      <div class="drawer" role="dialog" aria-label="宠物过滤面板">
+      <div class="drawer" role="dialog" aria-label="AT Pet 过滤面板">
         <div class="drawer-header">
-          <span class="drawer-title" data-role="title">${this.activeSkin.badgeIcon} 注意力守护宠物</span>
+          <span class="drawer-title" data-role="title">${this.activeSkin.badgeIcon} AT Pet</span>
           <span class="badge degraded" data-role="badge">轻装规则模式</span>
         </div>
 
@@ -913,6 +914,7 @@ export class FloatingPetController {
             <span class="empty-hint">暂无已收录 BGM（已内置 Sold Out 等常见滥用歌名）</span>
           </div>
           <div class="backup-msg" data-role="bgm-msg"></div>
+          <div class="empty-hint" data-role="audio-diag" style="margin-top:4px;line-height:1.4;font-family:ui-monospace,monospace"></div>
         </div>
 
         <div>
@@ -965,6 +967,7 @@ export class FloatingPetController {
     this.posListEl = shadow.querySelector('[data-role="pos-list"]');
     this.bgmListEl = shadow.querySelector('[data-role="bgm-list"]');
     this.bgmMsgEl = shadow.querySelector('[data-role="bgm-msg"]');
+    this.audioDiagEl = shadow.querySelector('[data-role="audio-diag"]');
     this.bgmCaptureBtn = shadow.querySelector('[data-role="bgm-capture-btn"]');
     this.bgmPenaltyBtn = shadow.querySelector('[data-role="bgm-penalty-btn"]');
     this.ruleInputEl = shadow.querySelector('[data-role="rule-input"]');
@@ -1228,8 +1231,15 @@ export class FloatingPetController {
         this.setBackupMessage(res?.error ?? '云同步失败，请检查 Chrome 登录状态', true);
         return;
       }
-      const pullText = res.pulledVectors > 0 ? `，拉取 ${res.pulledVectors} 条` : '';
-      this.setBackupMessage(`☁️ 已同步 ${res.syncedVectors} 条样本至 Chrome 账号${pullText}`);
+      const bgmText =
+        typeof res.syncedBgm === 'number' && res.syncedBgm > 0
+          ? ` · ${res.syncedBgm} 条音轨`
+          : '';
+      const pulledTotal = (res.pulledVectors ?? 0) + (res.pulledBgm ?? 0);
+      const pullText = pulledTotal > 0 ? `，拉取 ${pulledTotal} 条` : '';
+      this.setBackupMessage(
+        `☁️ 已同步 ${res.syncedVectors} 条样本${bgmText}至 Chrome 账号${pullText}`,
+      );
       this.options.onRequestRefreshStatus();
     } catch {
       this.setBackupMessage('云同步失败，请稍后重试', true);
@@ -1250,12 +1260,14 @@ export class FloatingPetController {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `attention-filter-pet-backup-${dateStr}.json`;
+      a.download = `at-pet-backup-${dateStr}.json`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      this.setBackupMessage(`已导出 ${res.data.vectors.length} 条样本`);
+      const bgmCount = res.data.bgmFingerprints?.length ?? 0;
+      const bgmPart = bgmCount > 0 ? `、${bgmCount} 条音轨` : '';
+      this.setBackupMessage(`已导出 ${res.data.vectors.length} 条样本${bgmPart}`);
     } catch {
       this.setBackupMessage('导出失败，请检查权限', true);
     }
@@ -1270,8 +1282,12 @@ export class FloatingPetController {
         this.setBackupMessage(res?.error ?? '导入失败：文件格式无效', true);
         return;
       }
+      const bgmPart =
+        typeof res.importedBgm === 'number' && res.importedBgm > 0
+          ? `、${res.importedBgm} 条音轨`
+          : '';
       this.setBackupMessage(
-        `已导入 ${res.importedVectors} 条样本、${res.importedRules} 条规则`,
+        `已导入 ${res.importedVectors} 条样本、${res.importedRules} 条规则${bgmPart}`,
       );
       this.options.onRequestRefreshStatus();
     } catch {
@@ -1303,7 +1319,7 @@ export class FloatingPetController {
     }
 
     if (this.drawerTitleEl) {
-      this.drawerTitleEl.textContent = `${skin.badgeIcon} 注意力守护宠物`;
+      this.drawerTitleEl.textContent = `${skin.badgeIcon} AT Pet`;
     }
 
     if (this.skinPickerEl) {
@@ -1595,6 +1611,12 @@ export class FloatingPetController {
       this.petBtnEl.classList.remove('listening');
       this.replaceSvg('idle');
     }
+  }
+
+  setAudioDiagnostic(summary: string, isAlert = false): void {
+    if (!this.audioDiagEl) return;
+    this.audioDiagEl.textContent = summary;
+    this.audioDiagEl.style.color = isAlert ? '#fda4af' : '#94a3b8';
   }
 
   triggerBgmDisgust(): void {

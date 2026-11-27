@@ -37,7 +37,6 @@ function toNormalizedItem(raw: RcmdItem): NormalizedItem | null {
     author_id: raw.owner?.mid ? String(raw.owner.mid) : '',
     author_name: raw.owner?.name ?? '',
     title: raw.title,
-    snippet: rcmdText || undefined,
     tags: [],
     cover_url: raw.pic,
     duration_sec: typeof raw.duration === 'number' ? raw.duration : undefined,

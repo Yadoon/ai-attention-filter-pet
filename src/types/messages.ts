@@ -1,4 +1,9 @@
-import type { DailyStatRecord, RuleRecord, VectorRecord } from '@/storage/db';
+import type {
+  BgmFingerprintRecord,
+  DailyStatRecord,
+  RuleRecord,
+  VectorRecord,
+} from '@/storage/db';
 import type { SyncSnapshot } from '@/storage/sync-codec';
 import type { SponsorSegment } from '@/engine/sponsorblock';
 import type { FilterConfig, FilterDecision, NormalizedItem } from './item';
@@ -10,6 +15,7 @@ export interface PetDataBackup {
   vectors: VectorRecord[];
   rules: RuleRecord[];
   stats: DailyStatRecord[];
+  bgmFingerprints?: BgmFingerprintRecord[];
 }
 
 export type ExtensionMessage =
@@ -107,6 +113,7 @@ export type ImportDataResponse = {
   ok: boolean;
   importedVectors: number;
   importedRules: number;
+  importedBgm?: number;
   error?: string;
 };
 
@@ -114,6 +121,8 @@ export type SyncNowResponse = {
   ok: boolean;
   syncedVectors: number;
   pulledVectors: number;
+  syncedBgm?: number;
+  pulledBgm?: number;
   error?: string;
 };
 

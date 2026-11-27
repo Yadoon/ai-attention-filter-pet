@@ -110,6 +110,7 @@ export async function evaluateBatch(
             Date.now(),
             activeMode,
             signal,
+            item.title,
           );
           decisionMap.set(item.item_id, decision);
         }

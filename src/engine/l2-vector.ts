@@ -5,6 +5,7 @@ export type EmbedderMode = 'neural' | 'ngram';
 
 export interface AnchorVector {
   id: string;
+  itemId?: string;
   polarity: 'negative' | 'positive';
   embedding: Float32Array;
   embedder?: EmbedderMode;
@@ -65,9 +66,6 @@ export function buildEmbeddingText(item: NormalizedItem): string {
   if (item.tags.length > 0) {
     parts.push(item.tags.slice(0, 5).join(' '));
   }
-  if (item.snippet) {
-    parts.push(item.snippet.slice(0, 120));
-  }
   return parts.join(' | ').trim();
 }
 
@@ -98,14 +96,32 @@ export function scoreAgainstAnchors(
   now = Date.now(),
   mode: EmbedderMode = 'neural',
   signal?: SignalAdjustment,
+  itemTitle?: string,
 ): FilterDecision {
   let maxNegScore = 0;
   let matchedAnchorId: string | undefined;
   let matchedTitle: string | undefined;
   let maxPosScore = 0;
   let matchedPosTitle: string | undefined;
+  let exactPosItemMatch = false;
+  const normalizedItemTitle = itemTitle?.trim();
 
   for (const anchor of anchors) {
+    const anchorTitle = anchor.text?.split(' | ')[0]?.trim();
+    if (anchor.polarity === 'positive') {
+      if (anchor.itemId && anchor.itemId === itemId) {
+        exactPosItemMatch = true;
+        maxPosScore = 1;
+        matchedPosTitle = anchorTitle || itemTitle;
+        continue;
+      }
+      if (normalizedItemTitle && anchorTitle && anchorTitle === normalizedItemTitle) {
+        maxPosScore = 1;
+        matchedPosTitle = anchorTitle;
+        continue;
+      }
+    }
+
     // Never compare vectors from different embedding spaces.
     const anchorMode = anchor.embedder ?? 'neural';
     if (anchorMode !== mode) continue;
@@ -116,11 +132,11 @@ export function scoreAgainstAnchors(
       if (effective > maxNegScore) {
         maxNegScore = effective;
         matchedAnchorId = anchor.id;
-        matchedTitle = anchor.text?.split(' | ')[0];
+        matchedTitle = anchorTitle;
       }
     } else if (sim > maxPosScore) {
       maxPosScore = sim;
-      matchedPosTitle = anchor.text?.split(' | ')[0];
+      matchedPosTitle = anchorTitle;
     }
   }
 
@@ -129,7 +145,7 @@ export function scoreAgainstAnchors(
   const effectivePos = maxPosScore >= minPosSim ? maxPosScore : 0;
   const signalDelta = signal && !signal.bypass ? signal.delta : 0;
   const boundaryScore = maxNegScore - config.positiveAlpha * effectivePos + signalDelta;
-  const blocked = signal?.bypass ? false : boundaryScore > threshold;
+  const blocked = exactPosItemMatch || signal?.bypass ? false : boundaryScore > threshold;
 
   const shortTitle = matchedTitle
     ? `《${matchedTitle.slice(0, 16)}${matchedTitle.length > 16 ? '…' : ''}》`
@@ -141,11 +157,13 @@ export function scoreAgainstAnchors(
     blocked,
     layer: 'L2',
     score: Number(boundaryScore.toFixed(4)),
-    reason: signal?.bypass
-      ? '已关注UP主豁免'
-      : blocked
-        ? `${modeLabel}${shortTitle} (${boundaryScore.toFixed(2)})`
-        : undefined,
+    reason: exactPosItemMatch
+      ? '白库精确放行'
+      : signal?.bypass
+        ? '已关注UP主豁免'
+        : blocked
+          ? `${modeLabel}${shortTitle} (${boundaryScore.toFixed(2)})`
+          : undefined,
     matchedAnchorId: blocked ? matchedAnchorId : undefined,
     matchedTitle: blocked ? matchedTitle : undefined,
     debug: {

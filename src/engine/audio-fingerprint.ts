@@ -307,45 +307,64 @@ export function computeBgmFingerprint(
   const n = frameBandEnergies.length;
   if (n === 0) return out;
 
-  // 1. Dims 0..15: Mean normalized sub-band energy (timbre profile).
+  // 1. Dims 0..15: Mean-centered sub-band energy (signed timbre shape — avoids positive-orthant cosine inflation).
   const mean = new Float32Array(NUM_BANDS);
   for (const v of frameBandEnergies) {
     for (let b = 0; b < NUM_BANDS; b++) mean[b] += v[b];
   }
+  let meanOfMean = 0;
   for (let b = 0; b < NUM_BANDS; b++) {
     mean[b] /= n;
-    out[b] = mean[b];
+    meanOfMean += mean[b];
+  }
+  meanOfMean /= NUM_BANDS;
+  for (let b = 0; b < NUM_BANDS; b++) {
+    out[b] = (mean[b] - meanOfMean) * 2.5;
   }
 
-  // 2. Dims 16..31: Sub-band standard deviation (dynamic modulation / rhythm).
+  // 2. Dims 16..31: Mean-centered sub-band standard deviation (dynamic modulation / rhythm).
+  const stds = new Float32Array(NUM_BANDS);
+  let meanStd = 0;
   for (let b = 0; b < NUM_BANDS; b++) {
     let varSum = 0;
     for (const v of frameBandEnergies) {
       const diff = v[b] - mean[b];
       varSum += diff * diff;
     }
-    out[16 + b] = Math.sqrt(varSum / n) * 1.4;
+    stds[b] = Math.sqrt(varSum / n);
+    meanStd += stds[b];
+  }
+  meanStd /= NUM_BANDS;
+  for (let b = 0; b < NUM_BANDS; b++) {
+    out[16 + b] = (stds[b] - meanStd) * 2.2;
   }
 
-  // 3. Dims 32..47: Mean positive spectral flux per band (onset/beat texture).
+  // 3. Dims 32..47: Mean-centered positive spectral flux per band (onset/beat texture).
   if (n > 1) {
+    const fluxes = new Float32Array(NUM_BANDS);
     for (let t = 1; t < n; t++) {
       const prev = frameBandEnergies[t - 1];
       const curr = frameBandEnergies[t];
       for (let b = 0; b < NUM_BANDS; b++) {
         const flux = curr[b] - prev[b];
-        if (flux > 0) out[32 + b] += flux;
+        if (flux > 0) fluxes[b] += flux;
       }
     }
+    let meanFlux = 0;
     for (let b = 0; b < NUM_BANDS; b++) {
-      out[32 + b] = (out[32 + b] / (n - 1)) * 1.6;
+      fluxes[b] /= n - 1;
+      meanFlux += fluxes[b];
+    }
+    meanFlux /= NUM_BANDS;
+    for (let b = 0; b < NUM_BANDS; b++) {
+      out[32 + b] = (fluxes[b] - meanFlux) * 2.4;
     }
   }
 
   // 4. Dims 48..63: Inter-band spectral contrast (harmonic slope).
   for (let b = 0; b < NUM_BANDS; b++) {
     const next = mean[(b + 1) % NUM_BANDS];
-    out[48 + b] = (next - mean[b]) * 1.5;
+    out[48 + b] = (next - mean[b]) * 1.8;
   }
 
   return l2Normalize(out);
