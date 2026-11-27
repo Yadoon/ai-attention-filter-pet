@@ -88,6 +88,14 @@ export interface FilterConfig {
   hideFloorCards: boolean;
   /** Fuse observable signals (like rate, danmaku, duration, followed status, author history) into L2 scoring. */
   enableSignalFusion: boolean;
+  /** Auto-skip crowdsourced sponsor segments on Bilibili video pages via Bilibili SponsorBlock. */
+  enableSponsorBlock: boolean;
+  /** Enable Audio L1 physical style guard (heavy EDM beat, repetitive meme loop, overused BGM list). */
+  enableAudioStyleGuard: boolean;
+  /** Opt-in local CLAP audio semantic model (~65MB) for Few-shot BGM style generalization. */
+  enableAudioClap: boolean;
+  /** Silently fetch & decode ~12s audio on 600ms card hover to warn before clicking in. */
+  enableHoverAudioPreview: boolean;
 }
 
 export const DEFAULT_FILTER_CONFIG: FilterConfig = {
@@ -102,4 +110,8 @@ export const DEFAULT_FILTER_CONFIG: FilterConfig = {
   hideAds: true,
   hideFloorCards: true,
   enableSignalFusion: true,
+  enableSponsorBlock: true,
+  enableAudioStyleGuard: true,
+  enableAudioClap: false,
+  enableHoverAudioPreview: true,
 };

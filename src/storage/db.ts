@@ -33,10 +33,24 @@ export interface DailyStatRecord {
   spitCount: number;
 }
 
+export interface BgmFingerprintRecord {
+  id: string;
+  label: string;
+  /** 'block' = hard dislike (annoying BGM), 'penalty' = overused/low-taste soft signal (e.g. Sold Out). */
+  severity?: 'block' | 'penalty';
+  /** 'dsp' = 64-dim spectral fingerprint, 'clap' = 512-dim CLAP semantic audio embedding. */
+  embedder?: 'dsp' | 'clap';
+  /** L2-normalized embedding (64-dim for dsp, 512-dim for clap). */
+  embedding: number[];
+  sourceItemId?: string;
+  createdAt: number;
+}
+
 export class PetDatabase extends Dexie {
   vectors!: EntityTable<VectorRecord, 'id'>;
   rules!: EntityTable<RuleRecord, 'id'>;
   stats!: EntityTable<DailyStatRecord, 'date'>;
+  bgmFingerprints!: EntityTable<BgmFingerprintRecord, 'id'>;
 
   constructor() {
     super('AttentionFilterPetDB');
@@ -44,6 +58,12 @@ export class PetDatabase extends Dexie {
       vectors: 'id, polarity, platform, itemId, createdAt, lastHitAt',
       rules: '++id, kind, value, [kind+value]',
       stats: 'date',
+    });
+    this.version(2).stores({
+      vectors: 'id, polarity, platform, itemId, createdAt, lastHitAt',
+      rules: '++id, kind, value, [kind+value]',
+      stats: 'date',
+      bgmFingerprints: 'id, createdAt',
     });
   }
 }

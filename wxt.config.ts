@@ -14,9 +14,12 @@ export default defineConfig({
     host_permissions: [
       '*://*.bilibili.com/*',
       '*://*.hdslb.com/*',
+      '*://*.bilivideo.com/*',
+      '*://*.bilivideo.cn/*',
       'https://huggingface.co/*',
       'https://*.hf.co/*',
       'https://hf-mirror.com/*',
+      'https://bsbsb.top/*',
     ],
     content_security_policy: {
       extension_pages:

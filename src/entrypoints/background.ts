@@ -1,3 +1,4 @@
+import { fetchSponsorSegments } from '@/engine/sponsorblock';
 import {
   SYNC_CHUNK_PREFIX,
   SYNC_META_KEY,
@@ -6,7 +7,11 @@ import {
   unpackSyncSnapshot,
   type SyncSnapshot,
 } from '@/storage/sync-codec';
-import type { ExtensionMessage, SyncNowResponse } from '@/types/messages';
+import type {
+  ExtensionMessage,
+  SponsorSegmentsResponse,
+  SyncNowResponse,
+} from '@/types/messages';
 
 const OFFSCREEN_URL = '/offscreen.html';
 let creatingOffscreen: Promise<void> | null = null;
@@ -127,6 +132,15 @@ export default defineBackground(() => {
     // Avoid infinite loop for messages already targeted at the offscreen document.
     if (message?.target === 'offscreen') return false;
 
+    if (message?.type === 'GET_SPONSOR_SEGMENTS') {
+      (async () => {
+        const segments = await fetchSponsorSegments(message.bvid);
+        const res: SponsorSegmentsResponse = { ok: true, segments };
+        sendResponse(res);
+      })();
+      return true;
+    }
+
     if (message?.type === 'SYNC_NOW') {
       (async () => {
         try {
@@ -159,6 +173,9 @@ export default defineBackground(() => {
       'REMOVE_VECTOR',
       'EXPORT_DATA',
       'IMPORT_DATA',
+      'ADD_BGM_FINGERPRINT',
+      'REMOVE_BGM_FINGERPRINT',
+      'MATCH_BGM_FINGERPRINT',
     ]);
     if (!message || !validTypes.has(message.type)) return false;
 

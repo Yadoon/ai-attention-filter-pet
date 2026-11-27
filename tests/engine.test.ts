@@ -232,3 +232,154 @@ describe('Observable signal fusion', () => {
     expect(highQualityLong.delta).toBeCloseTo(-0.14, 2); // -0.06 -0.04 -0.04
   });
 });
+
+import {
+  analyzeAudioStyle,
+  analyzeDecodedPcm,
+  computeBgmFingerprint,
+  matchBgmFingerprint,
+  matchOverusedBgmTitle,
+} from '@/engine/audio-fingerprint';
+
+describe('BGM acoustic fingerprint & L1 style guard', () => {
+  it('matches same BGM spectrum with voiceover perturbation and rejects distinct BGM', () => {
+    const makeFrames = (bassDb: number, midDb: number, highDb: number, wobble = 0) =>
+      Array.from({ length: 24 }, (_, t) => {
+        const frame = new Float32Array(1024).fill(-85);
+        for (let i = 2; i < 16; i++) frame[i] = bassDb + Math.sin(t * 0.7) * 4;
+        for (let i = 16; i < 60; i++) frame[i] = midDb + wobble * Math.cos(t);
+        for (let i = 60; i < 250; i++) frame[i] = highDb + Math.cos(t * 0.5) * 3;
+        return frame;
+      });
+
+    const bgmA = computeBgmFingerprint(makeFrames(-22, -55, -28));
+    // Same BGM with louder speech in mid-band (300-850Hz) and slightly different volume
+    const bgmAWithVoice = computeBgmFingerprint(makeFrames(-25, -42, -31, 3));
+    // Completely different acoustic profile (mid-heavy, quiet bass & highs)
+    const bgmB = computeBgmFingerprint(makeFrames(-80, -20, -78));
+
+    const hit = matchBgmFingerprint(bgmAWithVoice, [
+      { id: 'bgm:1', label: '悬疑罐头', severity: 'block', embedding: bgmA },
+    ]);
+    expect(hit.matched).toBe(true);
+    expect(hit.score).toBeGreaterThan(0.88);
+
+    const miss = matchBgmFingerprint(bgmB, [
+      { id: 'bgm:1', label: '悬疑罐头', severity: 'block', embedding: bgmA },
+    ]);
+    expect(miss.matched).toBe(false);
+    expect(miss.score).toBeLessThan(0.8);
+  });
+
+  it('detects pounding bass remix, repetitive meme loop, overused BGM titles, and gates calm speech', () => {
+    // 1. Pounding ~125 BPM bass beat (period = 6 frames @ 80ms = 0.48s)
+    const bassBeatFrames = Array.from({ length: 40 }, (_, t) => {
+      const frame = new Float32Array(1024).fill(-80);
+      const kick = t % 6 === 0 || t % 6 === 1 ? -8 : -48;
+      for (let i = 2; i <= 7; i++) frame[i] = kick;
+      for (let i = 60; i < 200; i++) frame[i] = -32;
+      return frame;
+    });
+    const beatStyle = analyzeAudioStyle(bassBeatFrames);
+    expect(beatStyle.isLikelySpeechOnly).toBe(false);
+    expect(beatStyle.bassBeatScore).toBeGreaterThanOrEqual(0.72);
+    expect(beatStyle.hardDisgust).toBe(true);
+
+    // 2. Repetitive 10-frame meme loop (period = 0.8s)
+    const loopFrames = Array.from({ length: 40 }, (_, t) => {
+      const frame = new Float32Array(1024).fill(-75);
+      const phase = t % 10;
+      const peakBin = 30 + phase * 18;
+      for (let i = peakBin; i < peakBin + 12; i++) frame[i] = -15;
+      return frame;
+    });
+    const loopStyle = analyzeAudioStyle(loopFrames);
+    expect(loopStyle.loopScore).toBeGreaterThanOrEqual(0.82);
+    expect(loopStyle.hardDisgust).toBe(true);
+
+    // 3. Calm non-repetitive speech (dominant mid band, weak bass & highs, varying syllable formants)
+    let seed = 1337;
+    const nextRand = () => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 0xffffffff;
+    };
+    const speechFrames = Array.from({ length: 40 }, () => {
+      const frame = new Float32Array(1024).fill(-85);
+      for (let i = 13; i < 45; i++) {
+        frame[i] = -45 + nextRand() * 30;
+      }
+      return frame;
+    });
+    const speechStyle = analyzeAudioStyle(speechFrames);
+    expect(speechStyle.isLikelySpeechOnly).toBe(true);
+    expect(speechStyle.hardDisgust).toBe(false);
+
+    // 3b. Steady dramatic/ambient build-up (flat spectrum, NOT a repetitive meme loop)
+    const steadyPadFrames = Array.from({ length: 40 }, (_, t) => {
+      const frame = new Float32Array(1024).fill(-70);
+      const swell = -35 + t * 0.4;
+      for (let i = 10; i < 120; i++) frame[i] = swell;
+      return frame;
+    });
+    const padStyle = analyzeAudioStyle(steadyPadFrames);
+    expect(padStyle.loopScore).toBeLessThan(0.5);
+    expect(padStyle.hardDisgust).toBe(false);
+
+    // 4. Built-in overused BGM title detection
+    expect(matchOverusedBgmTitle('Hawk Nelson - Sold Out (Official)')).toBe('sold out');
+    expect(matchOverusedBgmTitle('肖邦夜曲 Op.9 No.2')).toBeNull();
+  });
+
+  it('skips silent intro and analyzes peak 5s window from offline decoded 10s PCM', () => {
+    const sr = 16000;
+    const pcm = new Float32Array(sr * 10);
+    // 0..2s: silence (intro); 2..10s: pounding 125 BPM (0.48s period) broadband bass kicks + synth
+    for (let i = sr * 2; i < pcm.length; i++) {
+      const sec = i / sr;
+      const beatPhase = (sec % 0.48) / 0.48;
+      const kickEnv = beatPhase < 0.3 ? 0.45 : 0.04;
+      const kick =
+        Math.sin(2 * Math.PI * 72 * sec) +
+        Math.sin(2 * Math.PI * 96 * sec) +
+        Math.sin(2 * Math.PI * 124 * sec) +
+        Math.sin(2 * Math.PI * 152 * sec);
+      pcm[i] = kickEnv * kick + 0.12 * Math.sin(2 * Math.PI * 2400 * sec);
+    }
+
+    const sample = analyzeDecodedPcm(pcm, sr, true);
+    expect(sample).not.toBeNull();
+    expect(sample!.fingerprint.length).toBe(64);
+    expect(sample!.pcmInt16 && sample!.pcmInt16.length).toBeGreaterThan(24000);
+    expect(sample!.style.isLikelySpeechOnly).toBe(false);
+    expect(sample!.style.bassBeatScore).toBeGreaterThan(0.5);
+  });
+});
+
+import { extractMatchingSegments, sha256Prefix } from '@/engine/sponsorblock';
+
+describe('Bilibili SponsorBlock helper', () => {
+  it('computes 4-char SHA-256 prefix and extracts matching BV skip/full segments', async () => {
+    const prefix = await sha256Prefix('BV1xx411c7mD', 4);
+    expect(prefix).toMatch(/^[0-9a-f]{4}$/);
+
+    const segments = extractMatchingSegments(
+      [
+        {
+          videoID: 'BV1OTHER0001',
+          segments: [{ UUID: 'u0', category: 'sponsor', actionType: 'skip', segment: [10, 40] }],
+        },
+        {
+          videoID: 'BV1xx411c7mD',
+          segments: [
+            { UUID: 'u1', category: 'sponsor', actionType: 'skip', segment: [60.5, 110.2] },
+            { UUID: 'u2', category: 'sponsor', actionType: 'full', segment: [0, 0] },
+          ],
+        },
+      ],
+      'BV1xx411c7mD',
+    );
+    expect(segments.length).toBe(2);
+    expect(segments[0].UUID).toBe('u1');
+    expect(segments[1].actionType).toBe('full');
+  });
+});

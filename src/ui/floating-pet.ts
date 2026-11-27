@@ -22,6 +22,11 @@ export interface FloatingPetOptions {
   onAddRule: (kind: 'keyword' | 'author_block', value: string) => Promise<void>;
   onRemoveRule: (id: number) => Promise<void>;
   onRemoveVector: (id: string) => Promise<void>;
+  onCaptureBgm: (
+    severity: 'block' | 'penalty',
+    onProgress: (pct: number) => void,
+  ) => Promise<{ ok: boolean; message: string }>;
+  onRemoveBgm: (id: string) => Promise<void>;
   onRequestRefreshStatus: () => void;
   onExportData: () => Promise<ExportDataResponse>;
   onImportData: (data: PetDataBackup) => Promise<ImportDataResponse>;
@@ -445,6 +450,28 @@ const STYLES = `
     border-color: #fbbf24;
   }
 
+  .pet-btn.listening {
+    animation: mascotListen 900ms ease-in-out infinite;
+    filter: drop-shadow(0 0 10px rgba(168, 85, 247, 0.55));
+  }
+
+  .pet-btn.disgusted {
+    animation: mascotCringe 460ms ease-in-out infinite;
+    filter: drop-shadow(0 0 12px rgba(100, 116, 139, 0.75)) saturate(0.45) hue-rotate(-16deg) brightness(0.92);
+  }
+
+  @keyframes mascotListen {
+    0%, 100% { transform: translateY(0) rotate(-3deg); }
+    50% { transform: translateY(-4px) rotate(4deg); }
+  }
+
+  @keyframes mascotCringe {
+    0%, 100% { transform: translate(0, 0) rotate(0deg) scale(1); }
+    20% { transform: translate(-5px, 3px) rotate(-11deg) scale(0.93, 1.05); }
+    45% { transform: translate(5px, 2px) rotate(9deg) scale(1.04, 0.92); }
+    70% { transform: translate(-4px, 3px) rotate(-8deg) scale(0.95, 1.03); }
+  }
+
   @keyframes petFloat {
     0%, 100% { transform: translateY(0); }
     50% { transform: translateY(-4px); }
@@ -521,28 +548,84 @@ const STYLES = `
     user-select: none;
   }
 
-  .mood-fx {
+  .mood-svg {
     position: absolute;
-    font-size: 18px;
-    line-height: 1;
+    inset: -8px;
+    width: calc(100% + 16px);
+    height: calc(100% + 16px);
     pointer-events: none;
-    animation: fxPop 550ms ease-out forwards;
+    overflow: visible;
   }
 
-  .mood-fx-spark {
-    top: 4px;
-    left: -4px;
+  .mood-svg-eat {
+    animation: sparkFlash 520ms ease-out forwards;
   }
 
-  .mood-fx-sweat {
-    top: 6px;
-    right: 6px;
+  .mood-svg-spit {
+    animation: sweatDrop 600ms ease-out forwards;
   }
 
-  @keyframes fxPop {
-    0% { opacity: 0; transform: scale(0.5) translateY(4px); }
-    35% { opacity: 1; transform: scale(1.2) translateY(-3px); }
-    100% { opacity: 0; transform: scale(0.95) translateY(-10px); }
+  .mood-svg-listen .wave-1 {
+    animation: wavePulse 900ms ease-in-out infinite;
+  }
+
+  .mood-svg-listen .wave-2 {
+    animation: wavePulse 900ms ease-in-out 220ms infinite;
+  }
+
+  .mood-svg-listen .note-float {
+    animation: noteBob 900ms ease-in-out infinite;
+  }
+
+  .mood-svg-disgust .gloom-lines {
+    animation: gloomSlide 600ms ease-in-out infinite alternate;
+  }
+
+  .mood-svg-disgust .anger-mark {
+    transform-origin: 81px 20px;
+    animation: angerThrob 420ms ease-in-out infinite;
+  }
+
+  .mood-svg-disgust .noise-wave {
+    animation: noiseJitter 260ms linear infinite;
+  }
+
+  @keyframes sparkFlash {
+    0% { opacity: 0; transform: scale(0.75); }
+    30% { opacity: 1; transform: scale(1.12); }
+    100% { opacity: 0; transform: scale(1.22); }
+  }
+
+  @keyframes sweatDrop {
+    0% { opacity: 0; transform: translateY(-4px); }
+    35% { opacity: 1; transform: translateY(2px); }
+    100% { opacity: 0; transform: translateY(10px); }
+  }
+
+  @keyframes wavePulse {
+    0%, 100% { opacity: 0.35; transform: scale(0.94); }
+    50% { opacity: 1; transform: scale(1.06); }
+  }
+
+  @keyframes noteBob {
+    0%, 100% { transform: translateY(0) rotate(-4deg); }
+    50% { transform: translateY(-5px) rotate(5deg); }
+  }
+
+  @keyframes gloomSlide {
+    0% { opacity: 0.6; transform: translateY(-2px); }
+    100% { opacity: 1; transform: translateY(4px); }
+  }
+
+  @keyframes angerThrob {
+    0%, 100% { transform: scale(0.9); }
+    50% { transform: scale(1.18); }
+  }
+
+  @keyframes noiseJitter {
+    0%, 100% { transform: translate(0, 0); }
+    33% { transform: translate(-2px, 1px); }
+    66% { transform: translate(2px, -1px); }
   }
 
   .pet-face {
@@ -649,11 +732,20 @@ export class FloatingPetController {
   private rulesListEl: HTMLDivElement | null = null;
   private posSectionEl: HTMLDivElement | null = null;
   private posListEl: HTMLDivElement | null = null;
+  private bgmListEl: HTMLDivElement | null = null;
+  private bgmMsgEl: HTMLDivElement | null = null;
+  private bgmCaptureBtn: HTMLButtonElement | null = null;
+  private bgmPenaltyBtn: HTMLButtonElement | null = null;
   private ruleInputEl: HTMLInputElement | null = null;
   private syncDislikeInput: HTMLInputElement | null = null;
   private hideAdsInput: HTMLInputElement | null = null;
   private hideFloorInput: HTMLInputElement | null = null;
   private signalFusionInput: HTMLInputElement | null = null;
+  private sponsorBlockInput: HTMLInputElement | null = null;
+  private audioGuardInput: HTMLInputElement | null = null;
+  private audioClapInput: HTMLInputElement | null = null;
+  private hoverAudioInput: HTMLInputElement | null = null;
+  private clapStatusEl: HTMLSpanElement | null = null;
   private debugModeInput: HTMLInputElement | null = null;
   private backupMsgEl: HTMLDivElement | null = null;
   private importInputEl: HTMLInputElement | null = null;
@@ -771,6 +863,26 @@ export class FloatingPetController {
         </label>
 
         <label class="toggle-row">
+          <span>⏩ 自动跳过恰饭片段（SponsorBlock）</span>
+          <input type="checkbox" ${DEFAULT_FILTER_CONFIG.enableSponsorBlock ? 'checked' : ''} data-role="sponsor-block" />
+        </label>
+
+        <label class="toggle-row">
+          <span>🎧 音轨风格守卫（土嗨鼓点 / 洗脑循环 / 滥用BGM）</span>
+          <input type="checkbox" ${DEFAULT_FILTER_CONFIG.enableAudioStyleGuard ? 'checked' : ''} data-role="audio-guard" />
+        </label>
+
+        <label class="toggle-row">
+          <span>🧠 音频大模型 CLAP（风格泛化 · <span data-role="clap-status" style="color:#94a3b8">未开启</span>）</span>
+          <input type="checkbox" ${DEFAULT_FILTER_CONFIG.enableAudioClap ? 'checked' : ''} data-role="audio-clap" />
+        </label>
+
+        <label class="toggle-row">
+          <span>👆 悬停卡片静默试听（提前预警难听BGM/恰饭）</span>
+          <input type="checkbox" ${DEFAULT_FILTER_CONFIG.enableHoverAudioPreview ? 'checked' : ''} data-role="hover-audio" />
+        </label>
+
+        <label class="toggle-row">
           <span>🔍 调试模式（卡片左上角显示打分）</span>
           <input type="checkbox" ${DEFAULT_FILTER_CONFIG.debugMode ? 'checked' : ''} data-role="debug-mode" />
         </label>
@@ -789,6 +901,18 @@ export class FloatingPetController {
         <div data-role="pos-section" style="display:none">
           <div class="section-title"><span>白库纠偏保护（点 × 取消保护）</span></div>
           <div class="cloud" data-role="pos-list"></div>
+        </div>
+
+        <div>
+          <div class="section-title"><span>🎵 音轨指纹库（硬拉黑 / 烂大街降权）</span></div>
+          <div class="backup-row" style="margin-bottom:6px">
+            <button type="button" class="backup-btn" data-role="bgm-capture-btn" style="border-color:rgba(168,85,247,0.45);color:#d8b4fe">🎙 硬拉黑（4秒）</button>
+            <button type="button" class="backup-btn" data-role="bgm-penalty-btn" style="border-color:rgba(251,191,36,0.45);color:#fde68a">🏷 滥用降权（4秒）</button>
+          </div>
+          <div class="cloud" data-role="bgm-list">
+            <span class="empty-hint">暂无已收录 BGM（已内置 Sold Out 等常见滥用歌名）</span>
+          </div>
+          <div class="backup-msg" data-role="bgm-msg"></div>
         </div>
 
         <div>
@@ -839,11 +963,20 @@ export class FloatingPetController {
     this.rulesListEl = shadow.querySelector('[data-role="rules-list"]');
     this.posSectionEl = shadow.querySelector('[data-role="pos-section"]');
     this.posListEl = shadow.querySelector('[data-role="pos-list"]');
+    this.bgmListEl = shadow.querySelector('[data-role="bgm-list"]');
+    this.bgmMsgEl = shadow.querySelector('[data-role="bgm-msg"]');
+    this.bgmCaptureBtn = shadow.querySelector('[data-role="bgm-capture-btn"]');
+    this.bgmPenaltyBtn = shadow.querySelector('[data-role="bgm-penalty-btn"]');
     this.ruleInputEl = shadow.querySelector('[data-role="rule-input"]');
     this.syncDislikeInput = shadow.querySelector('[data-role="sync-dislike"]');
     this.hideAdsInput = shadow.querySelector('[data-role="hide-ads"]');
     this.hideFloorInput = shadow.querySelector('[data-role="hide-floor"]');
     this.signalFusionInput = shadow.querySelector('[data-role="signal-fusion"]');
+    this.sponsorBlockInput = shadow.querySelector('[data-role="sponsor-block"]');
+    this.audioGuardInput = shadow.querySelector('[data-role="audio-guard"]');
+    this.audioClapInput = shadow.querySelector('[data-role="audio-clap"]');
+    this.hoverAudioInput = shadow.querySelector('[data-role="hover-audio"]');
+    this.clapStatusEl = shadow.querySelector('[data-role="clap-status"]');
     this.debugModeInput = shadow.querySelector('[data-role="debug-mode"]');
     this.backupMsgEl = shadow.querySelector('[data-role="backup-msg"]');
     this.importInputEl = shadow.querySelector('[data-role="import-file"]');
@@ -874,6 +1007,40 @@ export class FloatingPetController {
       void this.options.onRemoveVector(id);
     });
 
+    this.bgmListEl?.addEventListener('click', (event) => {
+      const delBtn = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>('[data-del-bgm]');
+      const id = delBtn?.dataset.delBgm;
+      if (!id) return;
+      void this.options.onRemoveBgm(id);
+    });
+
+    const runBgmCapture = (severity: 'block' | 'penalty') => {
+      if (this.bgmCaptureBtn?.disabled || this.bgmPenaltyBtn?.disabled) return;
+      if (this.bgmCaptureBtn) this.bgmCaptureBtn.disabled = true;
+      if (this.bgmPenaltyBtn) this.bgmPenaltyBtn.disabled = true;
+      if (this.bgmMsgEl) {
+        this.bgmMsgEl.classList.remove('error');
+        this.bgmMsgEl.textContent = '正在聆听当前视频音轨 0%…';
+      }
+      void this.options
+        .onCaptureBgm(severity, (pct) => {
+          if (this.bgmMsgEl) this.bgmMsgEl.textContent = `正在聆听当前视频音轨 ${pct}%…`;
+        })
+        .then((res) => {
+          if (this.bgmMsgEl) {
+            this.bgmMsgEl.classList.toggle('error', !res.ok);
+            this.bgmMsgEl.textContent = res.message;
+          }
+        })
+        .finally(() => {
+          if (this.bgmCaptureBtn) this.bgmCaptureBtn.disabled = false;
+          if (this.bgmPenaltyBtn) this.bgmPenaltyBtn.disabled = false;
+        });
+    };
+
+    this.bgmCaptureBtn?.addEventListener('click', () => runBgmCapture('block'));
+    this.bgmPenaltyBtn?.addEventListener('click', () => runBgmCapture('penalty'));
+
     this.syncDislikeInput?.addEventListener('change', () => {
       if (!this.syncDislikeInput) return;
       this.options.onSyncNativeDislikeChange(this.syncDislikeInput.checked);
@@ -892,6 +1059,31 @@ export class FloatingPetController {
     this.signalFusionInput?.addEventListener('change', () => {
       if (!this.signalFusionInput) return;
       this.options.onConfigPatch({ enableSignalFusion: this.signalFusionInput.checked }, true);
+    });
+
+    this.sponsorBlockInput?.addEventListener('change', () => {
+      if (!this.sponsorBlockInput) return;
+      this.options.onConfigPatch({ enableSponsorBlock: this.sponsorBlockInput.checked }, false);
+    });
+
+    this.audioGuardInput?.addEventListener('change', () => {
+      if (!this.audioGuardInput) return;
+      this.options.onConfigPatch({ enableAudioStyleGuard: this.audioGuardInput.checked }, false);
+    });
+
+    this.audioClapInput?.addEventListener('change', () => {
+      if (!this.audioClapInput) return;
+      const enabled = this.audioClapInput.checked;
+      if (this.clapStatusEl) {
+        this.clapStatusEl.textContent = enabled ? '下载/加载中…' : '未开启';
+        this.clapStatusEl.style.color = enabled ? '#fbbf24' : '#94a3b8';
+      }
+      this.options.onConfigPatch({ enableAudioClap: enabled }, false);
+    });
+
+    this.hoverAudioInput?.addEventListener('change', () => {
+      if (!this.hoverAudioInput) return;
+      this.options.onConfigPatch({ enableHoverAudioPreview: this.hoverAudioInput.checked }, false);
     });
 
     this.debugModeInput?.addEventListener('change', () => {
@@ -1177,6 +1369,42 @@ export class FloatingPetController {
         status.config.enableSignalFusion ?? DEFAULT_FILTER_CONFIG.enableSignalFusion;
     }
 
+    if (this.sponsorBlockInput) {
+      this.sponsorBlockInput.checked =
+        status.config.enableSponsorBlock ?? DEFAULT_FILTER_CONFIG.enableSponsorBlock;
+    }
+
+    if (this.audioGuardInput) {
+      this.audioGuardInput.checked =
+        status.config.enableAudioStyleGuard ?? DEFAULT_FILTER_CONFIG.enableAudioStyleGuard;
+    }
+
+    if (this.audioClapInput) {
+      this.audioClapInput.checked =
+        status.config.enableAudioClap ?? DEFAULT_FILTER_CONFIG.enableAudioClap;
+    }
+
+    if (this.hoverAudioInput) {
+      this.hoverAudioInput.checked =
+        status.config.enableHoverAudioPreview ?? DEFAULT_FILTER_CONFIG.enableHoverAudioPreview;
+    }
+
+    if (this.clapStatusEl) {
+      if (status.clapReady) {
+        this.clapStatusEl.textContent = '已就绪';
+        this.clapStatusEl.style.color = '#34d399';
+      } else if (status.clapLoading) {
+        this.clapStatusEl.textContent = '下载中…';
+        this.clapStatusEl.style.color = '#fbbf24';
+      } else if (status.config.enableAudioClap) {
+        this.clapStatusEl.textContent = '待加载';
+        this.clapStatusEl.style.color = '#fbbf24';
+      } else {
+        this.clapStatusEl.textContent = '未开启';
+        this.clapStatusEl.style.color = '#94a3b8';
+      }
+    }
+
     if (this.debugModeInput) {
       this.debugModeInput.checked =
         status.config.debugMode ?? DEFAULT_FILTER_CONFIG.debugMode;
@@ -1226,6 +1454,41 @@ export class FloatingPetController {
         del.textContent = '×';
         chip.append(text, del);
         this.posListEl.appendChild(chip);
+      }
+    }
+
+    if (this.bgmListEl) {
+      const bgms = status.bgmFingerprints ?? [];
+      this.bgmListEl.replaceChildren();
+      if (bgms.length === 0) {
+        const empty = document.createElement('span');
+        empty.className = 'empty-hint';
+        empty.textContent = '暂无已收录 BGM（已内置 Sold Out 等常见滥用歌名）';
+        this.bgmListEl.appendChild(empty);
+      } else {
+        for (const b of bgms) {
+          const isPenalty = b.severity === 'penalty';
+          const chip = document.createElement('span');
+          chip.className = 'rule-chip';
+          chip.style.background = isPenalty
+            ? 'rgba(251, 191, 36, 0.14)'
+            : 'rgba(168, 85, 247, 0.16)';
+          chip.style.borderColor = isPenalty
+            ? 'rgba(251, 191, 36, 0.4)'
+            : 'rgba(168, 85, 247, 0.4)';
+          chip.style.color = isPenalty ? '#fde68a' : '#d8b4fe';
+          const text = document.createElement('span');
+          const prefix = b.embedder === 'clap' ? '🧠' : isPenalty ? '🏷' : '🎵';
+          text.textContent = `${prefix} ${b.label}`;
+          const del = document.createElement('button');
+          del.type = 'button';
+          del.className = 'rule-del';
+          del.dataset.delBgm = b.id;
+          del.title = '移除该音轨指纹';
+          del.textContent = '×';
+          chip.append(text, del);
+          this.bgmListEl.appendChild(chip);
+        }
       }
     }
 
@@ -1316,13 +1579,50 @@ export class FloatingPetController {
     this.playMood('spitting');
   }
 
+  setListening(active: boolean): void {
+    if (!this.petBtnEl) return;
+    if (active) {
+      if (this.animTimer !== null) {
+        window.clearTimeout(this.animTimer);
+        this.animTimer = null;
+      }
+      this.currentMood = 'listening';
+      this.petBtnEl.classList.remove('eating', 'spitting', 'disgusted');
+      this.petBtnEl.classList.add('listening');
+      this.replaceSvg('listening');
+    } else if (this.currentMood === 'listening') {
+      this.currentMood = 'idle';
+      this.petBtnEl.classList.remove('listening');
+      this.replaceSvg('idle');
+    }
+  }
+
+  triggerBgmDisgust(): void {
+    if (!this.petBtnEl) return;
+    if (this.animTimer !== null) {
+      window.clearTimeout(this.animTimer);
+    }
+    this.currentMood = 'disgusted';
+    this.petBtnEl.classList.remove('eating', 'spitting', 'listening', 'disgusted');
+    void this.petBtnEl.offsetWidth;
+    this.petBtnEl.classList.add('disgusted');
+    this.replaceSvg('disgusted');
+
+    this.animTimer = window.setTimeout(() => {
+      this.currentMood = 'idle';
+      this.petBtnEl?.classList.remove('disgusted');
+      this.replaceSvg('idle');
+      this.animTimer = null;
+    }, 2800);
+  }
+
   private playMood(mood: 'eating' | 'spitting'): void {
     if (!this.petBtnEl) return;
     if (this.animTimer !== null) {
       window.clearTimeout(this.animTimer);
     }
     this.currentMood = mood;
-    this.petBtnEl.classList.remove('eating', 'spitting');
+    this.petBtnEl.classList.remove('eating', 'spitting', 'listening', 'disgusted');
     // Force reflow so rapid consecutive feeds replay the animation cleanly.
     void this.petBtnEl.offsetWidth;
     this.petBtnEl.classList.add(mood);

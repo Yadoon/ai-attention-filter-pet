@@ -1,5 +1,6 @@
 import type { DailyStatRecord, RuleRecord, VectorRecord } from '@/storage/db';
 import type { SyncSnapshot } from '@/storage/sync-codec';
+import type { SponsorSegment } from '@/engine/sponsorblock';
 import type { FilterConfig, FilterDecision, NormalizedItem } from './item';
 
 export interface PetDataBackup {
@@ -25,7 +26,25 @@ export type ExtensionMessage =
   | { type: 'IMPORT_DATA'; data: PetDataBackup; mode?: 'merge' | 'replace' }
   | { type: 'GET_SYNC_SNAPSHOT' }
   | { type: 'APPLY_SYNC_SNAPSHOT'; snapshot: SyncSnapshot }
-  | { type: 'SYNC_NOW' };
+  | { type: 'SYNC_NOW' }
+  | {
+      type: 'ADD_BGM_FINGERPRINT';
+      label: string;
+      severity?: 'block' | 'penalty';
+      embedding: number[];
+      pcmInt16?: number[];
+      sourceItemId?: string;
+    }
+  | { type: 'REMOVE_BGM_FINGERPRINT'; id: string }
+  | { type: 'MATCH_BGM_FINGERPRINT'; embedding: number[]; pcmInt16?: number[] }
+  | { type: 'GET_SPONSOR_SEGMENTS'; bvid: string };
+
+export interface BgmFingerprintSummary {
+  id: string;
+  label: string;
+  severity: 'block' | 'penalty';
+  embedder: 'dsp' | 'clap';
+}
 
 export interface RuleSummary {
   id: number;
@@ -53,6 +72,8 @@ export interface RecentEatenEntry {
 export interface PetStatus {
   modelReady: boolean;
   modelLoading: boolean;
+  clapReady: boolean;
+  clapLoading: boolean;
   backend: 'webgpu' | 'wasm' | 'ngram';
   todayEaten: number;
   negativeCount: number;
@@ -62,6 +83,7 @@ export interface PetStatus {
   recentEaten: RecentEatenEntry[];
   rules: RuleSummary[];
   positiveAnchors: AnchorSummary[];
+  bgmFingerprints: BgmFingerprintSummary[];
   config: FilterConfig;
 }
 
@@ -93,4 +115,18 @@ export type SyncNowResponse = {
   syncedVectors: number;
   pulledVectors: number;
   error?: string;
+};
+
+export type MatchBgmResponse = {
+  ok: boolean;
+  matched: boolean;
+  score: number;
+  label?: string;
+  severity?: 'block' | 'penalty';
+  id?: string;
+};
+
+export type SponsorSegmentsResponse = {
+  ok: boolean;
+  segments: SponsorSegment[];
 };

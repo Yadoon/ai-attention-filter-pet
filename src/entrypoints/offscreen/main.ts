@@ -1,4 +1,15 @@
-import { env, pipeline, type FeatureExtractionPipeline } from '@huggingface/transformers';
+import {
+  AutoProcessor,
+  ClapAudioModelWithProjection,
+  env,
+  pipeline,
+  type FeatureExtractionPipeline,
+} from '@huggingface/transformers';
+import {
+  DEFAULT_CLAP_MATCH_THRESHOLD,
+  matchBgmFingerprint,
+  type BgmFingerprintAnchor,
+} from '@/engine/audio-fingerprint';
 import { extractTopKeywords } from '@/engine/keywords';
 import { createEmptyRuleSet, type L1RuleSet } from '@/engine/l1-rules';
 import {
@@ -17,12 +28,14 @@ import type {
   ExportDataResponse,
   ExtensionMessage,
   ImportDataResponse,
+  MatchBgmResponse,
   PetDataBackup,
   PetStatus,
   RecentEatenEntry,
 } from '@/types/messages';
 
 const MODEL_ID = 'Xenova/bge-small-zh-v1.5';
+const CLAP_MODEL_ID = 'Xenova/clap-htsat-unfused';
 const REMOTE_HOSTS = ['https://hf-mirror.com/', 'https://huggingface.co/'];
 const MAX_NEGATIVE_ANCHORS = 1000;
 const AUTHOR_BLOCK_SUGGEST_THRESHOLD = 3;
@@ -108,6 +121,76 @@ class TransformersEmbeddingProvider implements InferenceProvider {
 const neuralProvider = new TransformersEmbeddingProvider();
 const ngramProvider = new NgramEmbeddingProvider();
 
+/**
+ * Opt-in local CLAP audio encoder (~65MB audio tower only, q8) for 512-dim semantic BGM style embeddings.
+ */
+class ClapAudioEmbeddingProvider {
+  private processor: Awaited<ReturnType<typeof AutoProcessor.from_pretrained>> | null = null;
+  private model: Awaited<ReturnType<typeof ClapAudioModelWithProjection.from_pretrained>> | null =
+    null;
+  private loadingPromise: Promise<boolean> | null = null;
+  public loading = false;
+
+  isReady(): boolean {
+    return this.processor !== null && this.model !== null;
+  }
+
+  async init(): Promise<boolean> {
+    if (this.isReady()) return true;
+    if (this.loadingPromise) return this.loadingPromise;
+
+    this.loading = true;
+    this.loadingPromise = (async () => {
+      const hasWebGpu = typeof navigator !== 'undefined' && 'gpu' in navigator;
+      const devices: Array<'webgpu' | 'wasm'> = hasWebGpu ? ['webgpu', 'wasm'] : ['wasm'];
+
+      for (const host of REMOTE_HOSTS) {
+        env.remoteHost = host;
+        for (const device of devices) {
+          try {
+            console.info(`[AFP] Loading CLAP audio encoder (${CLAP_MODEL_ID}) from ${host} (${device})...`);
+            const [proc, mdl] = await Promise.all([
+              AutoProcessor.from_pretrained(CLAP_MODEL_ID),
+              ClapAudioModelWithProjection.from_pretrained(CLAP_MODEL_ID, {
+                device,
+                dtype: 'q8',
+              }),
+            ]);
+            this.processor = proc;
+            this.model = mdl;
+            console.info(`[AFP] Loaded CLAP audio encoder on ${device}`);
+            return true;
+          } catch (err) {
+            console.warn(`[AFP] Failed to load CLAP from ${host} (${device}):`, err);
+          }
+        }
+      }
+      return false;
+    })().finally(() => {
+      this.loading = false;
+      this.loadingPromise = null;
+    });
+
+    return this.loadingPromise;
+  }
+
+  async embedPcmInt16(pcmInt16: number[]): Promise<Float32Array> {
+    if (!this.processor || !this.model) {
+      throw new Error('CLAP audio model is not ready');
+    }
+    const pcm = new Float32Array(pcmInt16.length);
+    for (let i = 0; i < pcmInt16.length; i++) {
+      pcm[i] = pcmInt16[i] / 32767;
+    }
+    const audioInputs = await (this.processor as unknown as (audio: Float32Array) => Promise<Record<string, unknown>>)(pcm);
+    const out = await (this.model as unknown as (inputs: Record<string, unknown>) => Promise<{ audio_embeds: { tolist: () => number[][] } }>)(audioInputs);
+    const rows = out.audio_embeds.tolist();
+    return l2Normalize(new Float32Array(rows[0]));
+  }
+}
+
+const clapProvider = new ClapAudioEmbeddingProvider();
+
 function getActiveProvider(): InferenceProvider {
   return neuralProvider.isReady() ? neuralProvider : ngramProvider;
 }
@@ -115,6 +198,7 @@ function getActiveProvider(): InferenceProvider {
 let config: FilterConfig = { ...DEFAULT_FILTER_CONFIG };
 let cachedRules: L1RuleSet = createEmptyRuleSet();
 let cachedAnchors: AnchorVector[] = [];
+let cachedBgmAnchors: BgmFingerprintAnchor[] = [];
 const authorFeedCounts: Record<string, number> = {};
 const authorPositiveCounts: Record<string, number> = {};
 const recentEaten: RecentEatenEntry[] = [];
@@ -147,9 +231,10 @@ function writeConfigToStorage(next: FilterConfig): void {
 }
 
 async function loadStateFromDb(): Promise<void> {
-  const [rules, vectors] = await Promise.all([
+  const [rules, vectors, bgms] = await Promise.all([
     db.rules.toArray(),
     db.vectors.toArray(),
+    db.bgmFingerprints.toArray(),
   ]);
 
   const storedCfg = readConfigFromStorage();
@@ -188,6 +273,14 @@ async function loadStateFromDb(): Promise<void> {
     text: v.text,
     weight: v.weight,
     lastHitAt: v.lastHitAt,
+  }));
+
+  cachedBgmAnchors = bgms.map((b) => ({
+    id: b.id,
+    label: b.label,
+    severity: b.severity ?? 'block',
+    embedder: b.embedder ?? 'dsp',
+    embedding: new Float32Array(b.embedding),
   }));
 }
 
@@ -391,6 +484,9 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
     case 'UPDATE_CONFIG': {
       config = { ...config, ...msg.patch };
       writeConfigToStorage(config);
+      if (config.enableAudioClap && !clapProvider.isReady() && !clapProvider.loading) {
+        void clapProvider.init();
+      }
       return { ok: true, config };
     }
 
@@ -420,6 +516,8 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
       const status: PetStatus = {
         modelReady: neuralProvider.isReady(),
         modelLoading: neuralProvider.loading,
+        clapReady: clapProvider.isReady(),
+        clapLoading: clapProvider.loading,
         backend: neuralProvider.backend ?? 'ngram',
         todayEaten: stat?.eatenCount ?? 0,
         negativeCount: cachedAnchors.filter((a) => a.polarity === 'negative').length,
@@ -429,9 +527,105 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
         recentEaten: recentEaten.slice(0, 10),
         rules,
         positiveAnchors,
+        bgmFingerprints: cachedBgmAnchors.map((b) => ({
+          id: b.id,
+          label: b.label,
+          severity: b.severity,
+          embedder: b.embedder ?? 'dsp',
+        })),
         config,
       };
       return status;
+    }
+
+    case 'ADD_BGM_FINGERPRINT': {
+      const id = `bgm:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`;
+      let finalEmbedding = msg.embedding;
+      let embedder: 'dsp' | 'clap' = 'dsp';
+
+      if (clapProvider.isReady() && Array.isArray(msg.pcmInt16) && msg.pcmInt16.length >= 24_000) {
+        try {
+          const clapVec = await clapProvider.embedPcmInt16(msg.pcmInt16);
+          finalEmbedding = Array.from(clapVec);
+          embedder = 'clap';
+        } catch (err) {
+          console.warn('[AFP] CLAP embed failed during capture, falling back to DSP:', err);
+        }
+      }
+
+      await db.bgmFingerprints.put({
+        id,
+        label: msg.label.trim() || '罐头 BGM',
+        severity: msg.severity ?? 'block',
+        embedder,
+        embedding: finalEmbedding,
+        sourceItemId: msg.sourceItemId,
+        createdAt: Date.now(),
+      });
+      await loadStateFromDb();
+      return { ok: true, id, embedder };
+    }
+
+    case 'REMOVE_BGM_FINGERPRINT': {
+      await db.bgmFingerprints.delete(msg.id);
+      await loadStateFromDb();
+      return { ok: true };
+    }
+
+    case 'MATCH_BGM_FINGERPRINT': {
+      if (cachedBgmAnchors.length === 0) {
+        const empty: MatchBgmResponse = { ok: true, matched: false, score: 0 };
+        return empty;
+      }
+
+      // 1. Prefer 512-dim CLAP semantic audio matching when ready & PCM provided.
+      const hasClapAnchors = cachedBgmAnchors.some((a) => a.embedder === 'clap');
+      if (
+        hasClapAnchors &&
+        clapProvider.isReady() &&
+        Array.isArray(msg.pcmInt16) &&
+        msg.pcmInt16.length >= 24_000
+      ) {
+        try {
+          const clapProbe = await clapProvider.embedPcmInt16(msg.pcmInt16);
+          const clapRes = matchBgmFingerprint(
+            clapProbe,
+            cachedBgmAnchors,
+            DEFAULT_CLAP_MATCH_THRESHOLD,
+            'clap',
+          );
+          if (clapRes.matched) {
+            const reply: MatchBgmResponse = {
+              ok: true,
+              matched: true,
+              score: clapRes.score,
+              label: clapRes.anchor?.label,
+              severity: clapRes.anchor?.severity,
+              id: clapRes.anchor?.id,
+            };
+            return reply;
+          }
+        } catch (err) {
+          console.warn('[AFP] CLAP match failed, falling back to DSP:', err);
+        }
+      }
+
+      // 2. Fallback to 64-dim DSP fingerprint matching.
+      if (!Array.isArray(msg.embedding)) {
+        const empty: MatchBgmResponse = { ok: true, matched: false, score: 0 };
+        return empty;
+      }
+      const probe = new Float32Array(msg.embedding);
+      const res = matchBgmFingerprint(probe, cachedBgmAnchors, undefined, 'dsp');
+      const reply: MatchBgmResponse = {
+        ok: true,
+        matched: res.matched,
+        score: res.score,
+        label: res.anchor?.label,
+        severity: res.anchor?.severity,
+        id: res.anchor?.id,
+      };
+      return reply;
     }
 
     case 'REMOVE_VECTOR': {
@@ -682,6 +876,9 @@ void (async () => {
   const ok = await neuralProvider.init();
   if (ok) {
     await upgradeNgramVectorsToNeural();
+  }
+  if (config.enableAudioClap) {
+    void clapProvider.init();
   }
 })();
 

@@ -16,6 +16,17 @@ const AI_TEMPLATE_PATTERNS: RegExp[] = [
   /千万别再.{1,10}了/,
 ];
 
+const EXTRA_CLICKBAIT_PATTERNS: RegExp[] = [
+  /彻底颠覆|王炸|保姆级|全网最全|赚米|月入.{0,4}万|普通人逆袭/,
+];
+
+export function isClickbaitTitle(title: string): boolean {
+  return (
+    AI_TEMPLATE_PATTERNS.some((re) => re.test(title)) ||
+    EXTRA_CLICKBAIT_PATTERNS.some((re) => re.test(title))
+  );
+}
+
 const BGM_SUSPECT_MIN_HITS = 2;
 const BGM_SUSPECT_SCORE = 40;
 const AI_TEMPLATE_SCORE = 35;
