@@ -6,12 +6,15 @@ import {
   type AnchorVector,
   type InferenceProvider,
 } from './l2-vector';
+import { computeSignalAdjustment } from './signals';
 
 export interface PipelineContext {
   rules: L1RuleSet;
   anchors: AnchorVector[];
   config: FilterConfig;
   provider: InferenceProvider | null;
+  authorFeedCounts?: Record<string, number>;
+  authorPositiveCounts?: Record<string, number>;
 }
 
 export interface BatchEvaluationResult {
@@ -48,6 +51,16 @@ export async function evaluateBatch(
   const pendingForL2: NormalizedItem[] = [];
 
   for (const item of items) {
+    if (ctx.config.hideAds && item.is_promoted) {
+      decisionMap.set(item.item_id, {
+        item_id: item.item_id,
+        blocked: true,
+        layer: 'L1',
+        score: 100,
+        reason: '🚀 创作推广（起飞投流视频）',
+      });
+      continue;
+    }
     const { decision } = evaluateL1(item, ctx.rules);
     if (decision) {
       decisionMap.set(item.item_id, decision);
@@ -79,6 +92,16 @@ export async function evaluateBatch(
         );
         for (let i = 0; i < chunk.length; i++) {
           const item = chunk[i];
+          const signal = ctx.config.enableSignalFusion
+            ? computeSignalAdjustment(item, {
+                authorFeedCount: item.author_id
+                  ? ctx.authorFeedCounts?.[item.author_id] ?? 0
+                  : 0,
+                authorPositiveCount: item.author_id
+                  ? ctx.authorPositiveCounts?.[item.author_id] ?? 0
+                  : 0,
+              })
+            : undefined;
           const decision = scoreAgainstAnchors(
             item.item_id,
             embeddings[i],
@@ -86,6 +109,7 @@ export async function evaluateBatch(
             ctx.config,
             Date.now(),
             activeMode,
+            signal,
           );
           decisionMap.set(item.item_id, decision);
         }

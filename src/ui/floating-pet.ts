@@ -653,6 +653,7 @@ export class FloatingPetController {
   private syncDislikeInput: HTMLInputElement | null = null;
   private hideAdsInput: HTMLInputElement | null = null;
   private hideFloorInput: HTMLInputElement | null = null;
+  private signalFusionInput: HTMLInputElement | null = null;
   private debugModeInput: HTMLInputElement | null = null;
   private backupMsgEl: HTMLDivElement | null = null;
   private importInputEl: HTMLInputElement | null = null;
@@ -765,6 +766,11 @@ export class FloatingPetController {
         </label>
 
         <label class="toggle-row">
+          <span>📊 外显参数融合（点赞率/弹幕/时长/已关注）</span>
+          <input type="checkbox" ${DEFAULT_FILTER_CONFIG.enableSignalFusion ? 'checked' : ''} data-role="signal-fusion" />
+        </label>
+
+        <label class="toggle-row">
           <span>🔍 调试模式（卡片左上角显示打分）</span>
           <input type="checkbox" ${DEFAULT_FILTER_CONFIG.debugMode ? 'checked' : ''} data-role="debug-mode" />
         </label>
@@ -837,6 +843,7 @@ export class FloatingPetController {
     this.syncDislikeInput = shadow.querySelector('[data-role="sync-dislike"]');
     this.hideAdsInput = shadow.querySelector('[data-role="hide-ads"]');
     this.hideFloorInput = shadow.querySelector('[data-role="hide-floor"]');
+    this.signalFusionInput = shadow.querySelector('[data-role="signal-fusion"]');
     this.debugModeInput = shadow.querySelector('[data-role="debug-mode"]');
     this.backupMsgEl = shadow.querySelector('[data-role="backup-msg"]');
     this.importInputEl = shadow.querySelector('[data-role="import-file"]');
@@ -880,6 +887,11 @@ export class FloatingPetController {
     this.hideFloorInput?.addEventListener('change', () => {
       if (!this.hideFloorInput) return;
       this.options.onConfigPatch({ hideFloorCards: this.hideFloorInput.checked }, true);
+    });
+
+    this.signalFusionInput?.addEventListener('change', () => {
+      if (!this.signalFusionInput) return;
+      this.options.onConfigPatch({ enableSignalFusion: this.signalFusionInput.checked }, true);
     });
 
     this.debugModeInput?.addEventListener('change', () => {
@@ -1158,6 +1170,11 @@ export class FloatingPetController {
     if (this.hideFloorInput) {
       this.hideFloorInput.checked =
         status.config.hideFloorCards ?? DEFAULT_FILTER_CONFIG.hideFloorCards;
+    }
+
+    if (this.signalFusionInput) {
+      this.signalFusionInput.checked =
+        status.config.enableSignalFusion ?? DEFAULT_FILTER_CONFIG.enableSignalFusion;
     }
 
     if (this.debugModeInput) {

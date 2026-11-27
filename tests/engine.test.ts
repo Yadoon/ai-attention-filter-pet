@@ -201,3 +201,34 @@ describe('Chrome storage.sync chunk codec', () => {
     expect(restored!.config.l2Threshold).toBe(0.72);
   });
 });
+
+import { computeSignalAdjustment } from '@/engine/signals';
+
+describe('Observable signal fusion', () => {
+  it('bypasses followed creators and refines gray-zone scores via like/danmaku/duration', () => {
+    const followed = computeSignalAdjustment(
+      makeItem({ is_followed: true }),
+      { authorFeedCount: 2, authorPositiveCount: 0 },
+    );
+    expect(followed.bypass).toBe(true);
+
+    const lowQualityClip = computeSignalAdjustment(
+      makeItem({
+        duration_sec: 45,
+        metrics: { views: 20000, likes: 120, danmaku: 0 },
+      }),
+      { authorFeedCount: 1, authorPositiveCount: 0 },
+    );
+    expect(lowQualityClip.bypass).toBe(false);
+    expect(lowQualityClip.delta).toBeCloseTo(0.2, 2); // clamped max +0.20 (0.08+0.06+0.04+0.03 -> 0.20)
+
+    const highQualityLong = computeSignalAdjustment(
+      makeItem({
+        duration_sec: 1200,
+        metrics: { views: 10000, likes: 800, danmaku: 80 },
+      }),
+      { authorFeedCount: 0, authorPositiveCount: 0 },
+    );
+    expect(highQualityLong.delta).toBeCloseTo(-0.14, 2); // -0.06 -0.04 -0.04
+  });
+});

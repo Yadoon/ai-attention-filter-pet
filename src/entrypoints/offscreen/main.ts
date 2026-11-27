@@ -116,6 +116,7 @@ let config: FilterConfig = { ...DEFAULT_FILTER_CONFIG };
 let cachedRules: L1RuleSet = createEmptyRuleSet();
 let cachedAnchors: AnchorVector[] = [];
 const authorFeedCounts: Record<string, number> = {};
+const authorPositiveCounts: Record<string, number> = {};
 const recentEaten: RecentEatenEntry[] = [];
 const MAX_RECENT_EATEN = 20;
 
@@ -243,6 +244,8 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
         anchors: cachedAnchors,
         config,
         provider: activeProvider,
+        authorFeedCounts,
+        authorPositiveCounts,
       });
       const itemMap = new Map(msg.items.map((item) => [item.item_id, item]));
       let eatenNow = 0;
@@ -334,6 +337,10 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
     case 'SPIT_ITEM': {
       const { item, matchedAnchorId } = msg;
       const now = Date.now();
+
+      if (item.author_id) {
+        authorPositiveCounts[item.author_id] = (authorPositiveCounts[item.author_id] ?? 0) + 1;
+      }
 
       if (matchedAnchorId) {
         const existingNeg = await db.vectors.get(matchedAnchorId);

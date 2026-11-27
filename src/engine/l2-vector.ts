@@ -1,4 +1,5 @@
 import type { FilterConfig, FilterDecision, NormalizedItem } from '@/types/item';
+import type { SignalAdjustment } from './signals';
 
 export type EmbedderMode = 'neural' | 'ngram';
 
@@ -96,6 +97,7 @@ export function scoreAgainstAnchors(
   config: FilterConfig,
   now = Date.now(),
   mode: EmbedderMode = 'neural',
+  signal?: SignalAdjustment,
 ): FilterDecision {
   let maxNegScore = 0;
   let matchedAnchorId: string | undefined;
@@ -125,8 +127,9 @@ export function scoreAgainstAnchors(
   const threshold = getEffectiveThreshold(config, mode);
   const minPosSim = mode === 'ngram' ? Math.max(0.35, config.positiveMinSim - 0.35) : config.positiveMinSim;
   const effectivePos = maxPosScore >= minPosSim ? maxPosScore : 0;
-  const boundaryScore = maxNegScore - config.positiveAlpha * effectivePos;
-  const blocked = boundaryScore > threshold;
+  const signalDelta = signal && !signal.bypass ? signal.delta : 0;
+  const boundaryScore = maxNegScore - config.positiveAlpha * effectivePos + signalDelta;
+  const blocked = signal?.bypass ? false : boundaryScore > threshold;
 
   const shortTitle = matchedTitle
     ? `《${matchedTitle.slice(0, 16)}${matchedTitle.length > 16 ? '…' : ''}》`
@@ -138,9 +141,11 @@ export function scoreAgainstAnchors(
     blocked,
     layer: 'L2',
     score: Number(boundaryScore.toFixed(4)),
-    reason: blocked
-      ? `${modeLabel}${shortTitle} (${boundaryScore.toFixed(2)})`
-      : undefined,
+    reason: signal?.bypass
+      ? '已关注UP主豁免'
+      : blocked
+        ? `${modeLabel}${shortTitle} (${boundaryScore.toFixed(2)})`
+        : undefined,
     matchedAnchorId: blocked ? matchedAnchorId : undefined,
     matchedTitle: blocked ? matchedTitle : undefined,
     debug: {
@@ -150,6 +155,8 @@ export function scoreAgainstAnchors(
       threshold: Number(threshold.toFixed(2)),
       matchedNegTitle: matchedTitle,
       matchedPosTitle,
+      signalDelta: signal ? signal.delta : 0,
+      signalNotes: signal?.notes,
     },
   };
 }

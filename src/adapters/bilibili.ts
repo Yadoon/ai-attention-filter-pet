@@ -1,4 +1,5 @@
 import type { FilterDecision, NormalizedItem } from '@/types/item';
+import { openDecisionInspector } from '@/ui/decision-inspector';
 import type { AdapterCallbacks, CardBinding, SiteAdapter } from './base';
 
 const CARD_SELECTORS = [
@@ -17,6 +18,26 @@ const DEBUG_BADGE_CLASS = 'afp-debug-badge';
  * Bilibili's SPA unmounts virtualized cards.
  */
 const trackedCards = new WeakMap<HTMLElement, string>();
+
+function parseCompactCount(raw: string | null | undefined): number | undefined {
+  const text = raw?.trim();
+  if (!text) return undefined;
+  const num = parseFloat(text.replace(/,/g, ''));
+  if (!Number.isFinite(num)) return undefined;
+  if (text.includes('亿')) return Math.round(num * 100_000_000);
+  if (text.includes('万')) return Math.round(num * 10_000);
+  return Math.round(num);
+}
+
+function parseDurationSeconds(raw: string | null | undefined): number | undefined {
+  const text = raw?.trim();
+  if (!text || !text.includes(':')) return undefined;
+  const parts = text.split(':').map((p) => Number(p));
+  if (parts.some((n) => !Number.isFinite(n))) return undefined;
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return undefined;
+}
 
 function extractItemFromDom(el: HTMLElement, apiCache: Map<string, NormalizedItem>): NormalizedItem | null {
   const link = el.querySelector<HTMLAnchorElement>('a[href*="/video/BV"]');
@@ -39,6 +60,24 @@ function extractItemFromDom(el: HTMLElement, apiCache: Map<string, NormalizedIte
   const authorIdMatch = authorLink?.getAttribute('href')?.match(/space\.bilibili\.com\/(\d+)/);
   const imgEl = el.querySelector<HTMLImageElement>('img');
 
+  const durationEl =
+    el.querySelector<HTMLElement>('.bili-video-card__stats__duration') ??
+    el.querySelector<HTMLElement>('.duration');
+  const statItems = el.querySelectorAll<HTMLElement>('.bili-video-card__stats--item');
+  const views = parseCompactCount(statItems[0]?.textContent);
+  const danmaku = parseCompactCount(statItems[1]?.textContent);
+  const duration_sec = parseDurationSeconds(durationEl?.textContent);
+
+  // Detect Bilibili's 🚀 rocket-promoted ("创作推广 / 起飞") video cards:
+  // They replace the bottom-right MM:SS duration text with an SVG/icon or carry ad/cm links.
+  const hasRocketIcon =
+    (durationEl !== null &&
+      duration_sec === undefined &&
+      durationEl.querySelector('svg, img') !== null) ||
+    el.querySelector(
+      '[class*="rocket"], [class*="promote"], .bili-video-card__stats--ad, a[href*="cm.bilibili.com"], a[href*="ad_extra="]',
+    ) !== null;
+
   const title = titleEl?.textContent?.trim() ?? '';
   if (!title) return null;
 
@@ -51,6 +90,9 @@ function extractItemFromDom(el: HTMLElement, apiCache: Map<string, NormalizedIte
     title,
     tags: [],
     cover_url: imgEl?.src || undefined,
+    duration_sec,
+    metrics: views !== undefined || danmaku !== undefined ? { views, danmaku } : undefined,
+    is_promoted: hasRocketIcon || undefined,
     fetched_at: Math.floor(Date.now() / 1000),
   };
 }
@@ -202,6 +244,7 @@ export class BilibiliAdapter implements SiteAdapter {
 
     const reason = document.createElement('div');
     reason.textContent = decision.reason ?? '命中过滤规则';
+    reason.title = '点击查看皮卡丘决策账单';
     Object.assign(reason.style, {
       color: '#94a3b8',
       fontSize: isCompact ? '10px' : '11px',
@@ -209,6 +252,13 @@ export class BilibiliAdapter implements SiteAdapter {
       whiteSpace: isCompact ? 'nowrap' : 'normal',
       overflow: 'hidden',
       textOverflow: 'ellipsis',
+      cursor: 'pointer',
+      textDecoration: 'underline dotted rgba(148, 163, 184, 0.55)',
+    });
+    reason.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openDecisionInspector(reason, item, decision);
     });
 
     const actions = document.createElement('div');
@@ -340,14 +390,21 @@ export class BilibiliAdapter implements SiteAdapter {
     } else if (d) {
       const icon = decision.blocked ? '🔴' : '🟢';
       const posPart = d.effectivePos > 0 ? ` 白${d.maxPos.toFixed(2)}` : '';
-      badge.textContent = `${icon} ${decision.score.toFixed(2)} (负${d.maxNeg.toFixed(2)}${posPart})`;
+      const sigDelta = d.signalDelta ?? 0;
+      const sigPart =
+        sigDelta !== 0 ? ` ${sigDelta > 0 ? '+' : ''}${sigDelta.toFixed(2)}` : '';
+      badge.textContent = `${icon} ${decision.score.toFixed(2)} (负${d.maxNeg.toFixed(2)}${posPart}${sigPart})`;
       const negLine = d.matchedNegTitle
         ? `最像负样本：${d.matchedNegTitle} (${d.maxNeg.toFixed(3)})`
         : `负样本最高分：${d.maxNeg.toFixed(3)}`;
       const posLine = d.matchedPosTitle
         ? `最像白库：${d.matchedPosTitle} (${d.maxPos.toFixed(3)}${d.effectivePos > 0 ? ' · 已生效' : ' · 未达门槛'})`
         : `白库最高分：${d.maxPos.toFixed(3)}`;
-      badge.title = `${negLine}\n${posLine}\n最终分 ${decision.score.toFixed(3)} vs 阈值 ${d.threshold.toFixed(2)}`;
+      const sigLine =
+        d.signalNotes && d.signalNotes.length > 0
+          ? `\n外显修正：${d.signalNotes.join(' · ')}`
+          : '';
+      badge.title = `${negLine}\n${posLine}${sigLine}\n最终分 ${decision.score.toFixed(3)} vs 阈值 ${d.threshold.toFixed(2)}`;
     } else {
       badge.textContent = decision.blocked ? '🔴 拦截' : '⚪ 未评分';
       badge.title = decision.reason ?? '无负样本或降级放行';
@@ -369,9 +426,15 @@ export class BilibiliAdapter implements SiteAdapter {
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
       lineHeight: '1.3',
       pointerEvents: 'auto',
-      cursor: 'help',
+      cursor: 'pointer',
       backdropFilter: 'blur(4px)',
     });
+
+    badge.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openDecisionInspector(badge, binding.item, decision);
+    };
 
     if (!existing) {
       element.appendChild(badge);
@@ -416,6 +479,87 @@ export class BilibiliAdapter implements SiteAdapter {
         el.style.display = 'none';
         hiddenNow += 1;
       }
+
+      // Catch homepage feed ad cards injected via SSR or /x/web-show/res/locs
+      // (no /video/BV link, carrying "广告" badge, "人感兴趣", or cm.bilibili.com).
+      // Mask in-place so Bilibili's CSS grid & skeleton loader never break.
+      const feedCards = document.querySelectorAll<HTMLElement>('.bili-video-card');
+      for (const card of feedCards) {
+        if (card.closest('#biliMainHeader, .bili-header, header')) continue;
+        if (card.querySelector(`.${MASK_CLASS}`)) continue;
+        if (card.querySelector('a[href*="/video/BV"]')) continue;
+
+        const hasAdMarker =
+          card.querySelector(
+            'a[href*="cm.bilibili.com"], a[href*="ad_extra="], .bili-video-card__info--ad, .ad-tag, .bili-video-card__stats--ad',
+          ) !== null;
+
+        let hasAdText = false;
+        if (!hasAdMarker) {
+          const text = card.textContent ?? '';
+          if (text.includes('人感兴趣')) {
+            hasAdText = true;
+          } else {
+            const leaves = card.querySelectorAll<HTMLElement>('span, div, em, i, a');
+            for (const node of leaves) {
+              if (node.children.length > 0) continue;
+              const t = node.textContent?.trim();
+              if (t === '广告' || t === '创作推广') {
+                hasAdText = true;
+                break;
+              }
+            }
+          }
+        }
+
+        if (!hasAdMarker && !hasAdText) continue;
+
+        const computed = window.getComputedStyle(card);
+        if (computed.position === 'static') {
+          card.style.position = 'relative';
+        }
+        const adTitle =
+          card.querySelector<HTMLElement>('.bili-video-card__info--tit')?.textContent?.trim() ??
+          '商业推广广告';
+        const mask = document.createElement('div');
+        mask.className = MASK_CLASS;
+        mask.dataset.afpAdMask = '1';
+        Object.assign(mask.style, {
+          position: 'absolute',
+          inset: '0',
+          zIndex: '8',
+          boxSizing: 'border-box',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '6px',
+          padding: '12px',
+          textAlign: 'center',
+          borderRadius: '8px',
+          background: 'rgba(15, 23, 42, 0.92)',
+          border: '1px solid rgba(250, 204, 21, 0.45)',
+          backdropFilter: 'blur(10px)',
+          color: '#fde68a',
+          fontSize: '12px',
+          fontWeight: '600',
+        });
+        const heading = document.createElement('div');
+        heading.textContent = '🛡️ 皮卡丘已吃掉这条广告';
+        const sub = document.createElement('div');
+        sub.textContent = adTitle.slice(0, 28);
+        Object.assign(sub.style, {
+          color: '#94a3b8',
+          fontSize: '11px',
+          fontWeight: '400',
+        });
+        mask.append(heading, sub);
+        card.appendChild(mask);
+        hiddenNow += 1;
+      }
+    } else {
+      document.querySelectorAll<HTMLElement>('[data-afp-ad-mask="1"]').forEach((m) => m.remove());
     }
 
     // Hide standalone non-video floor cards (.floor-single-card) if any were SSR-rendered.

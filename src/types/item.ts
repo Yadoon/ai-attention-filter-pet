@@ -31,6 +31,10 @@ export interface NormalizedItem {
   bgm?: BgmInfo;
   duration_sec?: number;
   metrics?: ItemMetrics;
+  /** True when the creator is already followed by the user (natural whitelist protection). */
+  is_followed?: boolean;
+  /** True when the card is a paid-boosted / rocket-promoted ("创作推广 / 起飞") video. */
+  is_promoted?: boolean;
   fetched_at: number;
 }
 
@@ -43,6 +47,8 @@ export interface FilterDecisionDebug {
   threshold: number;
   matchedNegTitle?: string;
   matchedPosTitle?: string;
+  signalDelta?: number;
+  signalNotes?: string[];
 }
 
 export interface FilterDecision {
@@ -80,6 +86,8 @@ export interface FilterConfig {
   hideAds: boolean;
   /** Automatically hide non-video floor/promo cards (live, drama, documentary, manga, etc.). */
   hideFloorCards: boolean;
+  /** Fuse observable signals (like rate, danmaku, duration, followed status, author history) into L2 scoring. */
+  enableSignalFusion: boolean;
 }
 
 export const DEFAULT_FILTER_CONFIG: FilterConfig = {
@@ -93,4 +101,5 @@ export const DEFAULT_FILTER_CONFIG: FilterConfig = {
   debugMode: false,
   hideAds: true,
   hideFloorCards: true,
+  enableSignalFusion: true,
 };

@@ -7,13 +7,64 @@
  * are completely untouched.
  */
 
+import type { NormalizedItem } from '@/types/item';
+
 interface RcmdItem {
   goto?: string;
   bvid?: string;
+  title?: string;
+  pic?: string;
+  duration?: number;
   uri?: string;
   is_ad?: boolean;
+  is_ad_loc?: boolean;
+  is_followed?: number;
+  ad_cb?: string;
   business_info?: unknown;
   ad_info?: unknown;
+  owner?: { mid?: number; name?: string };
+  stat?: { view?: number; like?: number; danmaku?: number };
+  rcmd_reason?: { content?: string };
+}
+
+function toNormalizedItem(raw: RcmdItem): NormalizedItem | null {
+  if (!raw?.bvid || !raw?.title) return null;
+  const rcmdText = raw.rcmd_reason?.content?.trim();
+  return {
+    platform: 'bilibili',
+    item_id: raw.bvid,
+    media_type: 'video',
+    author_id: raw.owner?.mid ? String(raw.owner.mid) : '',
+    author_name: raw.owner?.name ?? '',
+    title: raw.title,
+    snippet: rcmdText || undefined,
+    tags: [],
+    cover_url: raw.pic,
+    duration_sec: typeof raw.duration === 'number' ? raw.duration : undefined,
+    metrics: raw.stat
+      ? {
+          views: typeof raw.stat.view === 'number' ? raw.stat.view : undefined,
+          likes: typeof raw.stat.like === 'number' ? raw.stat.like : undefined,
+          danmaku: typeof raw.stat.danmaku === 'number' ? raw.stat.danmaku : undefined,
+        }
+      : undefined,
+    is_followed: raw.is_followed === 1 || rcmdText === '已关注',
+    fetched_at: Math.floor(Date.now() / 1000),
+  };
+}
+
+function broadcastNormalizedItems(list: RcmdItem[]): void {
+  const items: NormalizedItem[] = [];
+  for (const raw of list) {
+    const normalized = toNormalizedItem(raw);
+    if (normalized) items.push(normalized);
+  }
+  if (items.length > 0) {
+    window.postMessage(
+      { source: 'afp-bilibili-hook', items },
+      window.location.origin,
+    );
+  }
 }
 
 interface RcmdPayload {
@@ -29,9 +80,16 @@ const RCMD_API_HINT = '/top/feed/rcmd';
 
 function isAdItem(item: RcmdItem): boolean {
   if (!item || typeof item !== 'object') return false;
-  if (item.goto === 'ad' || item.is_ad === true) return true;
-  if (item.business_info || item.ad_info) return true;
-  if (!item.bvid && typeof item.uri === 'string' && item.uri.includes('cm.bilibili.com')) {
+  if (item.goto === 'ad' || item.is_ad === true || item.is_ad_loc === true) return true;
+  if (item.business_info || item.ad_info || item.ad_cb) return true;
+  if (
+    typeof item.uri === 'string' &&
+    (item.uri.includes('cm.bilibili.com') || item.uri.includes('ad_extra='))
+  ) {
+    return true;
+  }
+  const rcmd = item.rcmd_reason?.content;
+  if (typeof rcmd === 'string' && (rcmd.includes('推广') || rcmd.includes('广告'))) {
     return true;
   }
   return false;
@@ -67,6 +125,7 @@ function filterRcmdPayload(payload: RcmdPayload): { changed: boolean; removed: n
   });
 
   const removed = list.length - filtered.length;
+  broadcastNormalizedItems(filtered);
   if (removed === 0) return { changed: false, removed: 0 };
 
   payload.data!.item = filtered;
