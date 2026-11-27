@@ -312,6 +312,42 @@ async function upgradeNgramVectorsToNeural(): Promise<void> {
   }
 }
 
+/**
+ * One-time idempotent cleanup for legacy vectors that had Bilibili rcmd_reason
+ * badges (e.g. " | 1万点赞", " | 很多人都在看") concatenated into text.
+ */
+async function cleanupLegacyVectorSnippets(): Promise<void> {
+  if (!neuralProvider.isReady()) return;
+  const all = await db.vectors.toArray();
+  const dirty = all.filter((v) => v.text.includes(' | '));
+  if (dirty.length === 0) return;
+
+  let cleaned = 0;
+  const CHUNK = 16;
+  for (let i = 0; i < dirty.length; i += CHUNK) {
+    const slice = dirty.slice(i, i + CHUNK);
+    const cleanTexts = slice.map((v) => v.text.split(' | ')[0].trim() || v.text);
+    try {
+      const embeddings = await neuralProvider.embedTexts(cleanTexts);
+      for (let j = 0; j < slice.length; j++) {
+        await db.vectors.update(slice[j].id, {
+          text: cleanTexts[j],
+          embedding: Array.from(embeddings[j]),
+          embedder: 'neural',
+        });
+        cleaned += 1;
+      }
+    } catch {
+      // Skip failed chunk; will retry on next startup.
+    }
+  }
+
+  if (cleaned > 0) {
+    console.info(`[AFP] Cleaned ${cleaned} legacy vectors (removed rcmd_reason suffix)`);
+    await loadStateFromDb();
+  }
+}
+
 async function incrementDailyStat(field: 'eatenCount' | 'spitCount', delta = 1): Promise<void> {
   const key = todayKey();
   const existing = await db.stats.get(key);
@@ -932,7 +968,7 @@ async function handleMessage(msg: ExtensionMessage): Promise<unknown> {
       await pruneNegativeBankIfNeeded();
       await loadStateFromDb();
       if (neuralProvider.isReady()) {
-        void upgradeNgramVectorsToNeural();
+        void upgradeNgramVectorsToNeural().then(() => cleanupLegacyVectorSnippets());
       }
       return { ok: true, pulledVectors, pulledBgm };
     }
@@ -944,6 +980,7 @@ void (async () => {
   const ok = await neuralProvider.init();
   if (ok) {
     await upgradeNgramVectorsToNeural();
+    await cleanupLegacyVectorSnippets();
   }
   if (config.enableAudioClap) {
     void clapProvider.init();

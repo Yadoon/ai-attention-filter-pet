@@ -96,6 +96,8 @@ export interface FilterConfig {
   enableAudioClap: boolean;
   /** Silently fetch & decode ~12s audio on 600ms card hover to warn before clicking in. */
   enableHoverAudioPreview: boolean;
+  /** Collapse/hide eaten cards (AI-blocked & ads) from DOM instead of showing overlay masks. Default false. */
+  removeBlockedCards: boolean;
 }
 
 export const DEFAULT_FILTER_CONFIG: FilterConfig = {
@@ -114,4 +116,5 @@ export const DEFAULT_FILTER_CONFIG: FilterConfig = {
   enableAudioStyleGuard: true,
   enableAudioClap: false,
   enableHoverAudioPreview: true,
+  removeBlockedCards: false,
 };

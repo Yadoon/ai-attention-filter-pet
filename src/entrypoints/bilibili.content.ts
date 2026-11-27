@@ -112,6 +112,7 @@ export default defineContentScript({
     let debugMode = false;
     let hideAds = true;
     let hideFloorCards = true;
+    let removeBlockedCards = false;
     let enableSponsorBlock = true;
     let enableAudioStyleGuard = true;
     let enableAudioClap = false;
@@ -147,6 +148,7 @@ export default defineContentScript({
             debugMode = status.config.debugMode ?? false;
             hideAds = status.config.hideAds ?? true;
             hideFloorCards = status.config.hideFloorCards ?? true;
+            removeBlockedCards = status.config.removeBlockedCards ?? false;
             enableSponsorBlock = status.config.enableSponsorBlock ?? true;
             enableAudioStyleGuard = status.config.enableAudioStyleGuard ?? true;
             enableAudioClap = status.config.enableAudioClap ?? false;
@@ -172,11 +174,19 @@ export default defineContentScript({
             adapter.clearAllDebugBadges();
           }
         }
-        if (typeof patch.hideAds === 'boolean' || typeof patch.hideFloorCards === 'boolean') {
+        if (
+          typeof patch.hideAds === 'boolean' ||
+          typeof patch.hideFloorCards === 'boolean' ||
+          typeof patch.removeBlockedCards === 'boolean'
+        ) {
           if (typeof patch.hideAds === 'boolean') hideAds = patch.hideAds;
           if (typeof patch.hideFloorCards === 'boolean') hideFloorCards = patch.hideFloorCards;
+          if (typeof patch.removeBlockedCards === 'boolean') {
+            removeBlockedCards = patch.removeBlockedCards;
+            adapter.setRemoveBlockedMode(removeBlockedCards);
+          }
           syncProxyFlags();
-          const eatenPromos = adapter.eatAdCards(hideAds, hideFloorCards);
+          const eatenPromos = adapter.eatAdCards(hideAds, hideFloorCards, removeBlockedCards);
           if (eatenPromos > 0) {
             pet.triggerEat(eatenPromos, `⚡ 清理推广 +${eatenPromos}`);
           }
@@ -324,6 +334,7 @@ export default defineContentScript({
             reason: '你手动投喂给了宠物',
           },
           callbacks,
+          removeBlockedCards,
         );
         pet.triggerEat(1);
 
@@ -399,7 +410,7 @@ export default defineContentScript({
           if (decision) {
             adapter.applyDebugBadge(binding, decision, debugMode);
             if (decision.blocked) {
-              adapter.applyMask(binding, decision, callbacks);
+              adapter.applyMask(binding, decision, callbacks, removeBlockedCards);
               autoBlocked += 1;
             }
           }
@@ -422,7 +433,7 @@ export default defineContentScript({
       if (scanTimer !== null) return;
       scanTimer = window.setTimeout(() => {
         scanTimer = null;
-        const eatenPromos = adapter.eatAdCards(hideAds, hideFloorCards);
+        const eatenPromos = adapter.eatAdCards(hideAds, hideFloorCards, removeBlockedCards);
         if (eatenPromos > 0) {
           pet.triggerEat(eatenPromos, `⚡ 清理推广 +${eatenPromos}`);
         }

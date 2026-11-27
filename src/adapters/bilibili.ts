@@ -173,13 +173,68 @@ export class BilibiliAdapter implements SiteAdapter {
     element.appendChild(btn);
   }
 
+  private getCollapseTarget(element: HTMLElement): HTMLElement {
+    let node: HTMLElement = element;
+    for (let depth = 0; depth < 5; depth++) {
+      const parent = node.parentElement;
+      if (!parent || parent === document.body) break;
+      if (parent.closest('#biliMainHeader, .bili-header, header')) break;
+
+      const parentDisplay = window.getComputedStyle(parent).display;
+      if (parentDisplay === 'grid' || parentDisplay === 'inline-grid') {
+        return node;
+      }
+
+      // Never walk up into a container that holds multiple cards or the homepage carousel.
+      if (
+        parent.classList.contains('recommended-swipe') ||
+        parent.querySelectorAll('.bili-video-card, .video-page-card-small, .feed-card').length > 1
+      ) {
+        return node;
+      }
+
+      node = parent;
+    }
+    return node;
+  }
+
+  private collapseCard(element: HTMLElement, kind: 'blocked' | 'ad' = 'blocked'): void {
+    const target = this.getCollapseTarget(element);
+    target.dataset.afpCollapsed = kind;
+    target.style.display = 'none';
+  }
+
+  setRemoveBlockedMode(enabled: boolean): void {
+    if (enabled) {
+      document.querySelectorAll<HTMLElement>(`.${MASK_CLASS}`).forEach((mask) => {
+        const card = mask.parentElement;
+        const kind = mask.dataset.afpAdMask === '1' ? 'ad' : 'blocked';
+        mask.remove();
+        if (card) {
+          this.collapseCard(card, kind);
+        }
+      });
+    } else {
+      document.querySelectorAll<HTMLElement>('[data-afp-collapsed]').forEach((el) => {
+        delete el.dataset.afpCollapsed;
+        el.style.display = '';
+      });
+    }
+  }
+
   applyMask(
     binding: CardBinding,
     decision: FilterDecision,
     callbacks: AdapterCallbacks,
+    removeBlocked = false,
   ): void {
     const { element, item } = binding;
     this.restoreCard(element);
+
+    if (removeBlocked) {
+      this.collapseCard(element, 'blocked');
+      return;
+    }
 
     const computed = window.getComputedStyle(element);
     if (computed.position === 'static') {
@@ -367,6 +422,11 @@ export class BilibiliAdapter implements SiteAdapter {
   restoreCard(element: HTMLElement): void {
     const existing = element.querySelector(`.${MASK_CLASS}`);
     if (existing) existing.remove();
+    const target = this.getCollapseTarget(element);
+    if (target.dataset.afpCollapsed) {
+      delete target.dataset.afpCollapsed;
+      target.style.display = '';
+    }
   }
 
   /**
@@ -456,7 +516,7 @@ export class BilibiliAdapter implements SiteAdapter {
    * Homepage feed items (`ad`, `live`, `ogv`, `manga`, etc.) are filtered cleanly at the API layer
    * in `bilibili-feed-proxy.content.ts` so homepage grid layout and skeleton loading stay intact.
    */
-  eatAdCards(hideAds: boolean, hideFloorCards = true): number {
+  eatAdCards(hideAds: boolean, hideFloorCards = true, removeBlocked = false): number {
     if (!hideAds) {
       document.querySelectorAll<HTMLElement>('[data-afp-hidden-kind="ad"]').forEach((el) => {
         el.style.display = '';
@@ -493,6 +553,7 @@ export class BilibiliAdapter implements SiteAdapter {
       for (const card of feedCards) {
         if (card.closest('#biliMainHeader, .bili-header, header')) continue;
         if (card.querySelector(`.${MASK_CLASS}`)) continue;
+        if (this.getCollapseTarget(card).dataset.afpCollapsed) continue;
         if (card.querySelector('a[href*="/video/BV"]')) continue;
 
         const hasAdMarker =
@@ -519,6 +580,12 @@ export class BilibiliAdapter implements SiteAdapter {
         }
 
         if (!hasAdMarker && !hasAdText) continue;
+
+        if (removeBlocked) {
+          this.collapseCard(card, 'ad');
+          hiddenNow += 1;
+          continue;
+        }
 
         const computed = window.getComputedStyle(card);
         if (computed.position === 'static') {
@@ -566,6 +633,10 @@ export class BilibiliAdapter implements SiteAdapter {
       }
     } else {
       document.querySelectorAll<HTMLElement>('[data-afp-ad-mask="1"]').forEach((m) => m.remove());
+      document.querySelectorAll<HTMLElement>('[data-afp-collapsed="ad"]').forEach((el) => {
+        delete el.dataset.afpCollapsed;
+        el.style.display = '';
+      });
     }
 
     // Hide standalone non-video floor cards (.floor-single-card) if any were SSR-rendered.

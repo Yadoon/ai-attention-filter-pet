@@ -741,6 +741,7 @@ export class FloatingPetController {
   private syncDislikeInput: HTMLInputElement | null = null;
   private hideAdsInput: HTMLInputElement | null = null;
   private hideFloorInput: HTMLInputElement | null = null;
+  private removeBlockedInput: HTMLInputElement | null = null;
   private signalFusionInput: HTMLInputElement | null = null;
   private sponsorBlockInput: HTMLInputElement | null = null;
   private audioGuardInput: HTMLInputElement | null = null;
@@ -884,6 +885,11 @@ export class FloatingPetController {
         </label>
 
         <label class="toggle-row">
+          <span>🧹 直接移除已吃掉卡片（无遮罩，高准确度后可开启）</span>
+          <input type="checkbox" ${DEFAULT_FILTER_CONFIG.removeBlockedCards ? 'checked' : ''} data-role="remove-blocked" />
+        </label>
+
+        <label class="toggle-row">
           <span>🔍 调试模式（卡片左上角显示打分）</span>
           <input type="checkbox" ${DEFAULT_FILTER_CONFIG.debugMode ? 'checked' : ''} data-role="debug-mode" />
         </label>
@@ -974,6 +980,7 @@ export class FloatingPetController {
     this.syncDislikeInput = shadow.querySelector('[data-role="sync-dislike"]');
     this.hideAdsInput = shadow.querySelector('[data-role="hide-ads"]');
     this.hideFloorInput = shadow.querySelector('[data-role="hide-floor"]');
+    this.removeBlockedInput = shadow.querySelector('[data-role="remove-blocked"]');
     this.signalFusionInput = shadow.querySelector('[data-role="signal-fusion"]');
     this.sponsorBlockInput = shadow.querySelector('[data-role="sponsor-block"]');
     this.audioGuardInput = shadow.querySelector('[data-role="audio-guard"]');
@@ -1057,6 +1064,11 @@ export class FloatingPetController {
     this.hideFloorInput?.addEventListener('change', () => {
       if (!this.hideFloorInput) return;
       this.options.onConfigPatch({ hideFloorCards: this.hideFloorInput.checked }, true);
+    });
+
+    this.removeBlockedInput?.addEventListener('change', () => {
+      if (!this.removeBlockedInput) return;
+      this.options.onConfigPatch({ removeBlockedCards: this.removeBlockedInput.checked }, true);
     });
 
     this.signalFusionInput?.addEventListener('change', () => {
@@ -1378,6 +1390,11 @@ export class FloatingPetController {
     if (this.hideFloorInput) {
       this.hideFloorInput.checked =
         status.config.hideFloorCards ?? DEFAULT_FILTER_CONFIG.hideFloorCards;
+    }
+
+    if (this.removeBlockedInput) {
+      this.removeBlockedInput.checked =
+        status.config.removeBlockedCards ?? DEFAULT_FILTER_CONFIG.removeBlockedCards;
     }
 
     if (this.signalFusionInput) {
